@@ -5,14 +5,12 @@ package main
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
-	"gvisor.dev/gvisor/pkg/timing"
 )
 
 func runSentry(root, executable string, imageFD int, inspect inspector) error {
@@ -48,21 +46,17 @@ func runSentry(root, executable string, imageFD int, inspect inspector) error {
 	if err != nil {
 		return err
 	}
-	timeline := timing.New("llar-runtime", time.Now()).Fork("guest")
-	defer timeline.End()
-
 	// CreateProcess takes ownership of one mount-namespace reference. The local
 	// reference above remains valid for cleanup on both success and failure.
 	mntns.IncRef()
 	tg, _, err := k.CreateProcess(kernel.CreateProcessArgs{
 		Filename: executable, Argv: []string{executable, "--llar-sandbox-guest"},
-		Envv: []string{"GOMAXPROCS=2"}, WorkingDirectory: "/",
-		Credentials: auth.NewUserCredentials(1000, 1000, nil, &auth.TaskCapabilities{}, k.RootUserNamespace()),
-		FDTable:     fdt, Umask: 0022, Limits: ls,
+		WorkingDirectory: "/",
+		Credentials:      auth.NewUserCredentials(1000, 1000, nil, &auth.TaskCapabilities{}, k.RootUserNamespace()),
+		FDTable:          fdt, Umask: 0022, Limits: ls,
 		MaxSymlinkTraversals: linux.MaxSymlinkTraversals,
 		UTSNamespace:         k.RootUTSNamespace(), IPCNamespace: k.RootIPCNamespace(),
 		PIDNamespace: k.RootPIDNamespace(), MountNamespace: mntns,
-		StartupTimeline: timeline,
 	})
 	if err != nil {
 		return fmt.Errorf("loading guest: %w", err)

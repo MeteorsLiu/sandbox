@@ -56,7 +56,6 @@ func Guest() (handled bool, err error) {
 		return true, err
 	}
 	fn.Interface().(func())()
-	runtime.GC()
 	out := newImage(mem[imageBytes:], m, functions)
 	if _, err := out.encode(fn, retained); err != nil {
 		return true, err

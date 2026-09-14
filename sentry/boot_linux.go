@@ -25,7 +25,6 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"time"
 
 	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/memutil"
@@ -44,7 +43,6 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sighandling"
-	"gvisor.dev/gvisor/pkg/timing"
 )
 
 var platformOnce sync.Once
@@ -71,7 +69,7 @@ func newKernel(inspect inspector) (*kernel.Kernel, error) {
 			platformErr = err
 			return
 		}
-		sharedPlatform, platformErr = constructor.New(platform.Options{StartupTimer: timing.New("llar-platform", time.Now())})
+		sharedPlatform, platformErr = constructor.New(platform.Options{})
 	})
 	if platformErr != nil {
 		return nil, platformErr

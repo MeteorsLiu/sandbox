@@ -27,7 +27,6 @@ func RunSandbox(guest *C.char, imageFD C.int, owner C.uintptr_t, callback C.insp
 	defer libraryMu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	runtime.GOMAXPROCS(3)
 	log.SetLevel(log.Warning)
 	report := func(err error) {
 		code = 1
