@@ -4,56 +4,67 @@ on:
   push:
     tags:
       - 'sentry/v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing Sentry tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build Linux ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    container: golang:1.26.6-bookworm
-    env:
-      CGO_ENABLED: '1'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Build shared library
-        shell: bash
-        run: |
-          bash sentry/build-linux.sh dist
-          mv dist/sentrylib.so dist/sentrylib-linux-${{ matrix.arch }}.so
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sentrylib-linux-${{ matrix.arch }}
-          path: dist/sentrylib-linux-${{ matrix.arch }}.so
-          if-no-files-found: error
-
   release:
-    name: Publish shared libraries
-    needs: build
+    name: Publish Sentry shared libraries
     runs-on: ubuntu-24.04
+    container: golang:1.26.6-bookworm
     permissions:
       contents: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}/source
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Check out release configuration
+        uses: actions/checkout@v4
         with:
-          pattern: sentrylib-linux-*
-          path: dist
-          merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+          ref: ${{ github.workflow_sha }}
+          path: release-config
+          persist-credentials: false
+          sparse-checkout: sentry/.goreleaser.yaml
+          sparse-checkout-cone-mode: false
+      - name: Check out release tag
+        uses: actions/checkout@v4
         with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            dist/sentrylib-linux-amd64.so
-            dist/sentrylib-linux-arm64.so
-          fail_on_unmatched_files: true
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify release source
+        run: |
+          case "$GORELEASER_CURRENT_TAG" in
+            sentry/v*) ;;
+            *) echo 'Expected a sentry/v* tag' >&2; exit 1 ;;
+          esac
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$GORELEASER_CURRENT_TAG^{commit}")"
+          test -z "$(git status --porcelain)"
+      - name: Install ARM64 C toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Build and publish with GoReleaser
+        uses: goreleaser/goreleaser-action@v7.2.3
+        with:
+          version: v2.18.1
+          workdir: source
+          # OSS GoReleaser cannot parse sentry/v* as semver; the tag and clean
+          # checkout are verified above before skipping its validation stage.
+          args: release --clean --skip=validate --config ../release-config/sentry/.goreleaser.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,33 @@
+version: 2
+project_name: sentry
+
+builds:
+  - id: sentry
+    dir: sentry
+    main: .
+    binary: sentrylib
+    buildmode: c-shared
+    flags:
+      - -mod=readonly
+    ldflags: ['']
+    env:
+      - CGO_ENABLED=1
+      - 'CC={{ if eq .Arch "arm64" }}aarch64-linux-gnu-gcc{{ else }}gcc{{ end }}'
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [binary]
+    name_template: 'sentrylib-{{ .Os }}-{{ .Arch }}'
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: xgo-dev
+    name: sandbox
+  name_template: '{{ .Tag }}'

@@ -16,12 +16,14 @@ The output contains `sentrylib.so`, the generated `sentrylib.h`, and `sandbox.h`
 
 ## Releases
 
-Pushing a tag matching `sentry/v*`, such as `sentry/v0.1.0`, builds both Linux architectures and uploads these shared libraries to the matching GitHub Release after both builds succeed:
+Pushing a tag matching `sentry/v*`, such as `sentry/v0.1.0`, runs GoReleaser to build both Linux architectures and upload these shared libraries directly to the matching GitHub Release after both builds succeed:
 
 - `sentrylib-linux-amd64.so`
 - `sentrylib-linux-arm64.so`
 
-Builds use Go 1.26.6 in Debian Bookworm containers on native runners. Set `Sandbox.Library` to the downloaded file's path, or rename it to `sentrylib.so` beside the host executable. The runtime conditions below still apply.
+Builds use Go 1.26.6 in a Debian Bookworm container, with an ARM64 cross compiler. GoReleaser also uploads the generated C headers and `checksums.txt`. Set `Sandbox.Library` to the downloaded file's path, or rename it to `sentrylib.so` beside the host executable. The runtime conditions below still apply.
+
+The workflow can also be dispatched with an existing Sentry tag to retry a failed release. It takes the release configuration from the workflow commit and builds the source at the requested tag. The tag prefix is checked and HEAD must match that tag with a clean checkout; GoReleaser's own validation is skipped because its open-source edition does not parse `sentry/v*` as a semantic version.
 
 ## C Entry
 
