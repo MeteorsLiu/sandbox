@@ -14,6 +14,15 @@ bash build-linux.sh /tmp/llar-sandbox
 
 The output contains `sentrylib.so`, the generated `sentrylib.h`, and `sandbox.h`. The Go host loads only the `.so` at runtime. Its `Sandbox.Library` field selects a path; the default is `sentrylib.so` beside the host executable.
 
+## Releases
+
+Pushing a tag matching `sentry/v*`, such as `sentry/v0.1.0`, builds both Linux architectures and uploads these shared libraries to the matching GitHub Release after both builds succeed:
+
+- `sentrylib-linux-amd64.so`
+- `sentrylib-linux-arm64.so`
+
+Builds use Go 1.26.6 in Debian Bookworm containers on native runners. Set `Sandbox.Library` to the downloaded file's path, or rename it to `sentrylib.so` beside the host executable. The runtime conditions below still apply.
+
 ## C Entry
 
 ```c

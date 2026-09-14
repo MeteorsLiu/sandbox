@@ -1,0 +1,59 @@
+name: Release Sentry
+
+on:
+  push:
+    tags:
+      - 'sentry/v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: golang:1.26.6-bookworm
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build shared library
+        shell: bash
+        run: |
+          bash sentry/build-linux.sh dist
+          mv dist/sentrylib.so dist/sentrylib-linux-${{ matrix.arch }}.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sentrylib-linux-${{ matrix.arch }}
+          path: dist/sentrylib-linux-${{ matrix.arch }}.so
+          if-no-files-found: error
+
+  release:
+    name: Publish shared libraries
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sentrylib-linux-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/sentrylib-linux-amd64.so
+            dist/sentrylib-linux-arm64.so
+          fail_on_unmatched_files: true
