@@ -15,7 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
-func runSentry(root, executable string, imageFD int, mainPC, entryPC uintptr, inspect inspector) error {
+func runSentry(root, executable string, imageFD int, mainPC, entryPC uintptr, inspect inspector) (err error) {
 	if executable == "" {
 		return errors.New("guest executable is required")
 	}
@@ -35,6 +35,7 @@ func runSentry(root, executable string, imageFD int, mainPC, entryPC uintptr, in
 		return err
 	}
 	defer k.Release()
+	defer func() { err = errors.Join(err, releaseSyscallMemory(k)) }()
 	ctx := k.SupervisorContext()
 
 	mntns, err := mountFilesystem(k, ioFD.Release())

@@ -36,11 +36,6 @@ func sandboxInspect(owner C.uintptr_t, event *C.struct_syscall_event) {
 	i := cgo.Handle(owner).Value().(*inspection)
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	defer func() {
-		if value := recover(); value != nil {
-			i.err = fmt.Errorf("inspector panicked: %v", value)
-		}
-	}()
 	if i.fn == nil || i.err != nil {
 		return
 	}
@@ -50,20 +45,29 @@ func sandboxInspect(owner C.uintptr_t, event *C.struct_syscall_event) {
 	}
 	a := &syscallAccess{active: true}
 	v.access = a
+	mapped := false
 	defer func() {
+		if value := recover(); value != nil {
+			i.err = fmt.Errorf("inspector panicked: %v", value)
+			if mapped {
+				event.failure = C.CString(i.err.Error())
+			}
+		}
 		a.mu.Lock()
 		a.active = false
-		a.read = nil
+		a.mmap = nil
 		a.mu.Unlock()
 	}()
-	a.read = func(address uint64, dst []byte) (int, error) {
-		var copied C.size_t
-		message := C.inspect_read(event, C.uint64_t(address), unsafe.Pointer(unsafe.SliceData(dst)), C.size_t(len(dst)), &copied)
+	a.mmap = func(address uint64, size int) (Memory, error) {
+		var memory C.struct_syscall_memory
+		message := C.inspect_mmap(event, C.uint64_t(address), C.size_t(size), &memory)
+		view := Memory{Data: unsafe.Slice((*byte)(memory.data), int(memory.length)), Addr: uint64(memory.address)}
+		mapped = mapped || len(view.Data) != 0
 		if message == nil {
-			return int(copied), nil
+			return view, nil
 		}
 		defer C.free(unsafe.Pointer(message))
-		return int(copied), fmt.Errorf("sandbox inspection: %s", C.GoString(message))
+		return view, fmt.Errorf("sandbox inspection: %s", C.GoString(message))
 	}
 	i.fn(&v)
 	event.number = C.uint64_t(v.Number)

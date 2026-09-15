@@ -9,17 +9,18 @@ package main
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"runtime/cgo"
 	"sync"
 	"unsafe"
 
+	"gvisor.dev/gvisor/pkg/abi/linux"
 	gcontext "gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
 
 var libraryMu sync.Mutex
@@ -44,13 +45,16 @@ func RunSandbox(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t
 			report(fmt.Errorf("Sentry startup panicked: %v", v))
 		}
 	}()
-	err := runSentry("/", C.GoString(guest), int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, _ platform.MemoryManager, ac *arch.Context64) {
+	installSyscallMemory()
+	var inspectionMu sync.Mutex
+	var inspectionErr error
+	err := runSentry("/", C.GoString(guest), int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, ac *arch.Context64) error {
 		if callback == nil {
-			return
+			return nil
 		}
 		task := kernel.TaskFromContext(ctx)
-		memory := sentryMemory{ctx: task.Kernel().SupervisorContext(), mm: task.MemoryManager()}
-		handle := cgo.NewHandle(memory)
+		m := &syscallMemory{ctx: task.Kernel().SupervisorContext(), mm: task.MemoryManager(), task: task}
+		handle := cgo.NewHandle(m)
 		defer handle.Delete()
 		event := C.struct_syscall_event{number: C.uint64_t(ac.SyscallNo())}
 		name := C.CString(task.SyscallTable().LookupName(ac.SyscallNo()))
@@ -61,13 +65,41 @@ func RunSandbox(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t
 			event.args[i] = C.uint64_t(arg.Uint64())
 		}
 		C.invoke_inspector(callback, owner, &event)
+		var err error
+		if event.failure != nil {
+			err = fmt.Errorf("syscall inspection: %s", C.GoString(event.failure))
+			C.free(unsafe.Pointer(event.failure))
+		}
+		if len(m.regions) != 0 {
+			if err != nil {
+				err = errors.Join(err, m.release())
+			} else {
+				memoryCalls.Lock()
+				memoryCalls.pending[task] = m
+				memoryCalls.live[m] = struct{}{}
+				memoryCalls.Unlock()
+			}
+		}
+		if err != nil {
+			inspectionMu.Lock()
+			if inspectionErr == nil {
+				inspectionErr = err
+			}
+			inspectionMu.Unlock()
+			task.Kernel().Kill(linux.WaitStatusExit(1))
+			return err
+		}
 		var args [6]uint64
 		for i, arg := range event.args {
 			args[i] = uint64(arg)
 		}
 		setSyscall(ac, uint64(event.number), args)
 		ac.SyscallSaveOrig()
+		return nil
 	})
+	if inspectionErr != nil {
+		err = inspectionErr
+	}
 	if err != nil {
 		report(err)
 	}

@@ -10,7 +10,7 @@ output=$(cd "$1" && pwd)
 cd "$(dirname "$0")"
 
 flags='-checklinkname=0 -extldflags=-Wl,-z,separate-code'
-go build -mod=readonly -ldflags="$flags" -o "$output/smoke" ./cmd/smoke
+go -C testdata build -mod=readonly -ldflags="$flags" -o "$output/smoke" .
 go test -c -mod=readonly -ldflags="$flags" -o "$output/transfer.test" .
 go list -mod=readonly -deps . > "$output/host-deps.txt"
 if grep -q '^gvisor.dev/gvisor' "$output/host-deps.txt"; then

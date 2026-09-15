@@ -8,21 +8,40 @@ import (
 type syscallAccess struct {
 	mu     sync.Mutex
 	active bool
-	read   func(uint64, []byte) (int, error)
+	mmap   func(uint64, int) (Memory, error)
 }
 
-// ReadMemory copies guest memory while Inspect is running. It respects guest
-// read permissions and may return both a partial count and an error. The copy
-// is not an atomic snapshot of memory shared with other guest threads.
-func (s *Syscall) ReadMemory(address uint64, dst []byte) (int, error) {
+// Memory is an independent syscall input stored in Sentry-managed pages.
+// Data directly maps those pages in the host; Addr identifies them in the guest.
+// Data is borrowed until Inspect returns and must not contain host Go pointers.
+type Memory struct {
+	Data []byte
+	Addr uint64
+}
+
+// MMap initializes temporary Sentry memory from size guest bytes and
+// returns a writable mapping. Editing Data does not change the original memory.
+// The caller explicitly assigns Addr to syscall arguments or nested pointers;
+// returning from Inspect resumes execution without a separate commit.
+//
+// A partial read returns a shorter Data slice and an error. Concurrent guest
+// writes are not an atomic snapshot. Temporary addresses must not escape the
+// synchronous syscall or be unmapped/remapped by guest threads.
+func (s *Syscall) MMap(address uint64, size int) (Memory, error) {
 	if s.access == nil {
-		return 0, fmt.Errorf("sandbox: syscall is not inside Inspect")
+		return Memory{}, fmt.Errorf("sandbox: syscall is not inside Inspect")
 	}
 	a := s.access
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.active {
-		return 0, fmt.Errorf("sandbox: Inspect has returned")
+		return Memory{}, fmt.Errorf("sandbox: Inspect has returned")
 	}
-	return a.read(address, dst)
+	if size < 0 {
+		return Memory{}, fmt.Errorf("sandbox: negative memory size")
+	}
+	if size == 0 {
+		return Memory{}, nil
+	}
+	return a.mmap(address, size)
 }

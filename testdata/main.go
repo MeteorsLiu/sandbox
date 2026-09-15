@@ -171,6 +171,9 @@ func run() error {
 	if err := inspectMemory(); err != nil {
 		return err
 	}
+	if err := inspectTemporaryMemory(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -196,16 +199,15 @@ func inspectMemory() error {
 		}
 		switch call.Name {
 		case "openat":
-			buf := make([]byte, len(path)+1)
-			n, err := call.ReadMemory(call.Args[1], buf)
-			if string(buf[:n]) != path+"\x00" {
+			view, err := call.MMap(call.Args[1], len(path)+1)
+			if string(view.Data) != path+"\x00" {
 				return
 			}
 			if err != nil {
-				inspectionErr = fmt.Errorf("guest memory read: %d %v", n, err)
+				inspectionErr = fmt.Errorf("guest memory read: %d %v", len(view.Data), err)
 				return
 			}
-			if _, err := call.ReadMemory(1, buf); err == nil {
+			if _, err := call.MMap(1, len(path)+1); err == nil {
 				inspectionErr = fmt.Errorf("unmapped guest memory read succeeded")
 				return
 			}
@@ -215,13 +217,12 @@ func inspectMemory() error {
 			if call.Args[2] != uint64(len("inspection payload")) {
 				return
 			}
-			buf := make([]byte, len("inspection payload"))
-			n, err := call.ReadMemory(call.Args[1], buf)
+			view, err := call.MMap(call.Args[1], len("inspection payload"))
 			if err != nil {
 				inspectionErr = err
 				return
 			}
-			if string(buf[:n]) != "inspection payload" {
+			if string(view.Data) != "inspection payload" {
 				return
 			}
 			bufferRead = true
@@ -261,8 +262,8 @@ func inspectMemory() error {
 	}
 	check(pathRead && content == "fixture content", "openat pathname read")
 	check(bufferRead && received == "inspection" && written == len(received), "write buffer read and raw count edit")
-	if _, err := retained.ReadMemory(1, make([]byte, 1)); err == nil {
-		return fmt.Errorf("retained ReadMemory was accepted")
+	if _, err := retained.MMap(1, 1); err == nil {
+		return fmt.Errorf("retained MMap was accepted")
 	}
 	fmt.Println("PASS guest path/buffer reads, raw syscall argument edit, invalid address and callback lifetime")
 	return nil

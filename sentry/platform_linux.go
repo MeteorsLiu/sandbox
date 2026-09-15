@@ -10,7 +10,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
 
-type inspector func(context.Context, platform.MemoryManager, *arch.Context64)
+type inspector func(context.Context, *arch.Context64) error
 
 type observedPlatform struct {
 	platform.Platform
@@ -30,7 +30,9 @@ func (c *observedContext) Switch(ctx context.Context, mm platform.MemoryManager,
 	info, access, err := c.Context.Switch(ctx, mm, ac, cpu)
 	if err == nil {
 		ac.SyscallSaveOrig()
-		c.inspect(ctx, mm, ac)
+		if err := c.inspect(ctx, ac); err != nil {
+			return nil, hostarch.NoAccess, err
+		}
 	}
 	return info, access, err
 }

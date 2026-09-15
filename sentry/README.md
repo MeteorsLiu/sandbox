@@ -21,7 +21,7 @@ Pushing a tag matching `sentry/v*`, such as `sentry/v0.1.0`, runs GoReleaser to 
 - `sentrylib-linux-amd64.so`
 - `sentrylib-linux-arm64.so`
 
-Builds use Go 1.26.6 in a Debian Bookworm container, with an ARM64 cross compiler. GoReleaser also uploads the generated C headers and `checksums.txt`. Set `Sandbox.Library` to the downloaded file's path, or rename it to `sentrylib.so` beside the host executable. The runtime conditions below still apply.
+Builds use Go 1.26.6 in a Debian Bookworm container, with an ARM64 cross compiler. GoReleaser also uploads `checksums.txt`; C headers are available from a local build. Set `Sandbox.Library` to the downloaded file's path, or rename it to `sentrylib.so` beside the host executable. The runtime conditions below still apply.
 
 The workflow can also be dispatched with an existing Sentry tag to retry a failed release. It takes the release configuration from the workflow commit and builds the source at the requested tag. The tag prefix is checked and HEAD must match that tag with a clean checkout; GoReleaser's own validation is skipped because its open-source edition does not parse `sentry/v*` as a semantic version.
 
@@ -37,24 +37,30 @@ int RunSandbox(char *guest, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
 - `main_pc` is the guest virtual address to redirect; the caller supplies its `main.main` address. The caller must verify that the symbol contains at least 5 bytes on AMD64 or 4 bytes on ARM64. Before starting guest tasks, the library writes a relative branch into this private executable mapping using Sentry's existing memory manager.
 - `entry_pc` is the guest virtual address of the caller's private, non-capturing Go `func()` startup entry. It runs after Go package initialization and returns after exporting closure results. The caller owns ELF symbol resolution, guest code and value reconstruction. The library checks branch range and alignment; it does not interpret the closure image. Unsupported branch layouts fail before creating the guest.
 - `owner` is an opaque integer passed unchanged to `inspect`. A Go caller can use a `cgo.Handle` owned by its own runtime.
-- `inspect` is an optional synchronous callback. It receives a borrowed `syscall_event` containing the syscall number, name, six arguments and a memory-read callback. The caller owns argument parsing and may change the registers directly. A null callback skips inspection setup. Guest pointer arguments must not be dereferenced in the host.
+- `inspect` is an optional synchronous callback. It receives a borrowed `syscall_event` containing the syscall number, name, six arguments and a memory mapping callback. The caller owns argument parsing and may change the registers directly. A null callback skips inspection setup. Guest pointer arguments must not be dereferenced in the host.
 - `message` is a writable error buffer of `capacity` bytes. A nonzero result indicates an error; zero means that the guest exited successfully.
 
 All supplied strings, buffers and callback state must remain valid until `RunSandbox` returns. Each event, its name and its context handle are borrowed only for the duration of `inspect`. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
 
-The C entry name stays `RunSandbox`; releases use Go module version tags. The host and shared library must have matching ABI declarations. Go module version selection does not validate a library loaded with `dlopen`, and symbol lookup cannot detect an incompatible signature with the same name. This revision is unreleased and requires a matching host build.
+The C entry name stays `RunSandbox`; releases use Go module version tags. The `sentry/v0.2.0` ABI adds guest entry redirection and syscall memory mapping and is incompatible with `sentry/v0.1.0`. Build the host and shared library from the same source revision. Go module version selection does not validate a library loaded with `dlopen`, and symbol lookup cannot detect an incompatible signature with the same name.
 
-The event's `read` callback copies guest bytes into a caller-owned buffer and reports both a byte count and an optional error. Returned error strings are allocated with the C allocator; the caller frees them with `free`. The callback does not retain the caller's buffer. The host implementation serializes reads and invalidates access before returning from `inspect`.
+The event's `mmap(context, address, size, memory)` callback allocates anonymous temporary guest pages using `MMap`, pins them, and initializes them from the source using `CopyIn`. Sentry chooses a vacant guest address. The returned `syscall_memory` contains a host `data` pointer directly mapping those pages, their guest `address`, and the initialized `length`. The host and guest addresses need not match. Editing `data` immediately changes the temporary pages without changing the original guest bytes. There is no caller-owned staging buffer or write/commit callback; initialization copies bytes and is not COW.
 
-[inspect_linux.go](inspect_linux.go) reads through Sentry's memory manager and exports the synchronous C callback. Syscall arguments cross the boundary as raw registers; this module does not decode or encode their contents.
+The caller explicitly replaces syscall arguments and nested pointers with the returned guest addresses. Sentry does not scan or relocate their contents. Memory access expires when `inspect` returns; the data pointer must not escape that callback or contain host Go pointers. A partial read returns the initialized prefix and an optional C-allocated error string, which the caller frees with `free`. An inspection `failure` is a C-allocated error string consumed and freed by Sentry; it aborts execution and releases temporary mappings.
+
+[inspect_linux.go](inspect_linux.go) implements the memory callback. [memory_linux.go](memory_linux.go) uses `MapInternal` to expose pinned pages; when those pages are fragmented, it maps their backing file ranges into a contiguous host reservation. It wraps registered syscall functions once to release temporary mappings after execution. Restarted calls and calls skipped before dispatch are retained until kernel teardown. The wrapper does not decode arguments or copy outputs to original guest buffers. Temporary addresses must not be retained by the syscall or unmapped/remapped by guest threads; these operations are not currently prevented.
 
 ```text
 guest syscall
     -> seccomp / SIGSYS / sysmsg
     -> underlying Context.Switch returns
     -> host inspection callback
+       -> MMap: MMap + Pin + CopyIn to temporary pages
+       <- host alias + guest address
+       -> edit temporary pages and explicitly replace arguments/pointers
     -> updated registers
     -> Sentry syscall dispatch
+    -> release temporary mappings
     -> next Context.Switch resumes the guest
 ```
 
