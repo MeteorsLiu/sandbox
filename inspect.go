@@ -19,8 +19,9 @@ type Memory struct {
 	Addr uint64
 }
 
-// MMap initializes temporary Sentry memory from size guest bytes and
-// returns a writable mapping. Editing Data does not change the original memory.
+// MMap allocates size bytes of temporary Sentry memory and returns a writable
+// mapping. Address zero allocates zeroed memory; a nonzero address copies guest
+// bytes into it. Editing Data does not change the original memory.
 // The caller explicitly assigns Addr to syscall arguments or nested pointers;
 // returning from Inspect resumes execution without a separate commit.
 //

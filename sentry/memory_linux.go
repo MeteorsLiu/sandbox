@@ -42,9 +42,12 @@ func (m *syscallMemory) mmap(address hostarch.Addr, size uint64) (data []byte, g
 	if !ok || uint64(length) > uint64(^uint(0)>>1) {
 		return nil, 0, linuxerr.EINVAL
 	}
-	source, ok := m.mm.CheckIORange(address, int64(size))
-	if !ok {
-		return nil, 0, linuxerr.EFAULT
+	var source hostarch.AddrRange
+	if address != 0 {
+		source, ok = m.mm.CheckIORange(address, int64(size))
+		if !ok {
+			return nil, 0, linuxerr.EFAULT
+		}
 	}
 	addr, err := m.mm.MMap(m.task, memmap.MMapOpts{
 		Length: uint64(length), Private: true,
@@ -63,7 +66,7 @@ func (m *syscallMemory) mmap(address hostarch.Addr, size uint64) (data []byte, g
 	temporary := hostarch.AddrRange{Start: addr, End: addr + length}
 	// A vacant source address can be selected by MMap. Do not let this new
 	// mapping make an invalid source readable (for example, after munmap).
-	if temporary.Overlaps(source) {
+	if address != 0 && temporary.Overlaps(source) {
 		return nil, 0, linuxerr.EFAULT
 	}
 	r.pins, err = m.mm.Pin(m.task, temporary, hostarch.ReadWrite, false)
@@ -74,11 +77,14 @@ func (m *syscallMemory) mmap(address hostarch.Addr, size uint64) (data []byte, g
 	if err != nil {
 		return nil, 0, err
 	}
-	// Copy directly into the temporary pages. The host receives their alias,
-	// not another buffer; the original guest mapping remains untouched.
-	n, err := m.mm.CopyIn(m.ctx, address, r.mapping[:int(size)], usermem.IOOpts{})
-	if n == 0 && err != nil {
-		return nil, 0, err
+	// Anonymous pages are initially zeroed. A nonzero source initializes them
+	// directly; the host receives an alias of these same temporary pages.
+	n := int(size)
+	if address != 0 {
+		n, err = m.mm.CopyIn(m.ctx, address, r.mapping[:n], usermem.IOOpts{})
+		if n == 0 && err != nil {
+			return nil, 0, err
+		}
 	}
 	if len(m.regions) == 0 {
 		m.mm.IncUsers()

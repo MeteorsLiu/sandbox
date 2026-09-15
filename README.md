@@ -54,9 +54,13 @@ The default library is `sentrylib.so` beside the executable. One library remains
 
 `Name`, `Number` and the six raw `Args` are available without reading guest memory. The interceptor owns syscall argument parsing. It can change `Number` and `Args` directly before returning. There is no structured argument codec.
 
-`MMap(address, size)` creates independent temporary pages in the guest's Sentry memory manager and initializes them from the requested guest bytes. `Memory.Data` directly maps those temporary pages into the host, while `Memory.Addr` is their guest address. Editing `Data` changes the temporary pages immediately and leaves the original guest memory unchanged. Initialization copies bytes inside Sentry; this is not copy-on-write. There is no host staging buffer or copy-back step.
+`MMap(address, size)` creates independent temporary pages in the guest's Sentry memory manager. Address `0` allocates `size` zeroed bytes without reading guest memory; a nonzero address initializes the pages from the requested guest bytes. `Memory.Data` directly maps those temporary pages into the host, while `Memory.Addr` is their guest address. Editing `Data` changes the temporary pages immediately and leaves the original guest memory unchanged. Initialization from a source copies bytes inside Sentry; this is not copy-on-write. There is no host staging buffer or copy-back step. Anonymous allocation requires `sentry/v0.3.0` or later; `sentry/v0.2.0` does not support it.
 
-For an `openat` whose original pathname is `/tmp/input`, use `C.CString` to create the replacement. Both example paths have the same byte length. Add the cgo declaration and `unsafe` import to the file:
+**Pointer safety:** When `Inspect` injects a new syscall buffer, it must allocate that buffer through `MMap` and use the returned `Memory.Addr` for pointer arguments and nested pointers such as `iovec.base` or entries in `argv`. Never inject addresses of host Go objects, Go slice/string backing memory, `C.CString`/`C.malloc` allocations, or `Memory.Data` itself. `Data` is only the host view used to access the temporary pages; converting its pointer to `uintptr` does not produce a guest address.
+
+Sentry interprets syscall pointers in the guest address space. A host address can cause `EFAULT` or refer to unrelated guest memory, causing unintended reads or writes; exposing it also leaks a host address. Treat injecting host pointers as a security bug. Copying intended payload bytes from host memory into `Data` is allowed, but do not copy Go slice/string headers or structs containing host pointers as syscall data. Encode their pointer fields explicitly with guest addresses. The interceptor owns this rule; raw register edits are not checked for host-pointer provenance.
+
+For an `openat` whose original pathname is `/tmp/input`, allocate enough memory for a longer replacement and use `C.CString` to supply its contents. Add the cgo declaration and `unsafe` import to the file:
 
 ```go
 /*
@@ -70,8 +74,8 @@ import "unsafe"
 Inside `Inspect`:
 
 ```go
-const replacement = "/tmp/other"
-view, err := call.MMap(call.Args[1], len("/tmp/input")+1)
+const replacement = "/tmp/longer-replacement"
+view, err := call.MMap(0, len(replacement)+1)
 if err != nil {
     panic(err)
 }
@@ -81,7 +85,15 @@ copy(view.Data, unsafe.Slice((*byte)(unsafe.Pointer(cpath)), len(replacement)+1)
 call.Args[1] = view.Addr
 ```
 
-`C.CString` supplies the terminating NUL; the copy includes that extra byte. `C.free` releases the host C allocation after the callback returns. The temporary guest pages keep their own copy.
+`C.CString` supplies the terminating NUL; the copy includes that extra byte. `C.free` releases the host C allocation after the callback returns. The temporary guest pages keep their own copy. Only `view.Addr` goes into the syscall:
+
+```go
+call.Args[1] = view.Addr // Correct: guest address.
+
+// Never inject either host address:
+// call.Args[1] = uint64(uintptr(unsafe.Pointer(cpath)))
+// call.Args[1] = uint64(uintptr(unsafe.Pointer(unsafe.SliceData(view.Data))))
+```
 
 To read the pathname as a Go string, use cgo's `C.GoString`. With additional imports for `bytes` and `fmt`, the view above can be read inside `Inspect`:
 
@@ -91,7 +103,7 @@ if bytes.IndexByte(view.Data, 0) < 0 {
     return
 }
 path := C.GoString((*C.char)(unsafe.Pointer(unsafe.SliceData(view.Data))))
-fmt.Println(path) // /tmp/other
+fmt.Println(path) // /tmp/longer-replacement
 ```
 
 Check for a NUL within `Data` before calling `C.GoString`, which otherwise reads until it finds one. The resulting Go string is a copy and may outlive the callback. `C.CString` does the reverse conversion and allocates separate host C memory; its pointer is not a guest address.
@@ -113,7 +125,7 @@ binary.NativeEndian.PutUint64(vector.Data[:8], payload.Addr)
 call.Args[1] = vector.Addr
 ```
 
-Returning from `Inspect` submits the edited registers. There is no public allocator, `Commit`, or `WriteMemory`. The host view is borrowed only until the callback returns and must not contain host Go pointers. Do not convert its host pointer to a guest address. These views replace synchronous syscall inputs; syscall outputs are not copied back to the original buffers. The returned size is limited to readable source bytes; growing a replacement beyond that size is not supported.
+Returning from `Inspect` submits the edited registers. There is no separate allocator, `Commit`, or `WriteMemory`. The host view is borrowed only until the callback returns and must not contain host Go or C pointers. These views replace synchronous syscall inputs; syscall outputs are not copied back to the original buffers. For nonzero addresses, the returned size is limited to readable source bytes. Use `MMap(0, size)` when a replacement needs more space.
 
 Reads respect guest permissions and may return a shorter `Data` slice together with an error. Zero length returns an empty view. Access after the callback returns fails. Use the view synchronously and do not concurrently modify event fields. Other guest threads can change source memory, so this is not an atomic snapshot. Read errors do not automatically deny the syscall.
 
@@ -138,7 +150,7 @@ Run(fn)
                                            |
   Inspect(Name, Number, Args) <-------------+
        |                                   |
-       +-- MMap(addr, size) --------------> MMap + Pin + CopyIn to temporary pages
+       +-- MMap(addr, size) --------------> MMap + Pin; CopyIn only if addr != 0
        | <------ Data alias, guest Addr ----+
        +-- edit Data --------------------> same temporary pages
        +-- optional Number / Args edits --> syscall registers
@@ -179,6 +191,9 @@ type traceTask struct {
 func (t traceTask) Name() string { return "guest" }
 
 func (t traceTask) Read(addr strace.Addr, dst any) (int, error) {
+    if addr == 0 {
+        return 0, fmt.Errorf("null guest address")
+    }
     size := binary.Size(dst)
     if size < 0 {
         return 0, fmt.Errorf("unsupported strace destination %T", dst)
@@ -217,7 +232,7 @@ guest E openat(0xffffffffffffff9c, 0x56793be86040 /etc/hostname, O_RDONLY|O_CLOE
 
 Formatting runs in the host callback; it needs no ptrace attachment or Sentry decoder. u-root chooses its syscall table for the build architecture. This example formats syscall entry arguments; `Inspect` runs before execution, so return values and `read` output are unavailable there.
 
-The adapter handles the byte slices used for pathnames and other fixed-size values accepted by `encoding/binary`. Layouts containing `uintptr` require additional caller-side decoding. u-root v0.16.0 reads strings one byte at a time, so this simple adapter creates a temporary mapping for each byte; account for that cost before using it for high-volume tracing.
+The adapter rejects address zero because `MMap(0, size)` allocates memory instead of reading a null pointer. It handles the byte slices used for pathnames and other fixed-size values accepted by `encoding/binary`. Layouts containing `uintptr` require additional caller-side decoding. u-root v0.16.0 reads strings one byte at a time, so this simple adapter creates a temporary mapping for each byte; account for that cost before using it for high-volume tracing.
 
 ## Reading Order
 
@@ -263,6 +278,6 @@ This is an executable module with a general `func()` entry, not yet a production
 
 `sentry/build-linux.sh` builds only the shared library and its C headers. The root `build-linux.sh` builds the integration program in [testdata/main.go](testdata/main.go), including the syscall-memory checks in [testdata/memory.go](testdata/memory.go), into `smoke`. It also builds the root module's value-transfer tests and checks that the host dependency list contains no gVisor packages. The [testdata/go.mod](testdata/go.mod) module uses a local `replace` directive to test the current checkout; it is not included by the root module's `go test ./...`. The root build script does not build the Sentry library.
 
-The smoke test covers automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. It also checks for descriptor growth after warming the shared platform, guest path/buffer reads, raw syscall argument editing, invalid guest addresses and expired inspection access. Temporary-memory checks cover immediate visibility of host edits, unchanged original guest bytes, explicit path and nested `writev` pointer replacement, cross-page data, concurrent calls, guest mapping cleanup and a panic after mapping memory.
+The smoke test covers automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. It also checks for descriptor growth after warming the shared platform, guest path/buffer reads, raw syscall argument editing, invalid guest addresses and expired inspection access. Temporary-memory checks cover immediate visibility of host edits, zeroed anonymous allocations for longer path and buffer replacements, unchanged original guest bytes, explicit path and nested `writev` pointer replacement, cross-page data, concurrent calls, guest mapping cleanup and a panic after mapping memory.
 
 LLAR's separate formula integration passes `OnBuild(ctx)` with both `Project.ReadFile` and `os.ReadFile`, a native output-directory callback, and result writeback to the original `Context` and `Project`. Both ARM64 and emulated AMD64 value-transfer tests reject malformed lengths, unauthorized code entries, unknown types, changed retention counts, merged identities and overlapping slices without changing host captures.

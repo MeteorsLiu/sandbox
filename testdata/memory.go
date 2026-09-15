@@ -26,7 +26,7 @@ func inspectTemporaryMemory() error {
 		return err
 	}
 	original := filepath.Join(dir, "original")
-	replacement := filepath.Join(dir, "replaced")
+	replacement := filepath.Join(dir, "longer-replacement")
 	if err := os.WriteFile(original, []byte("original file"), 0644); err != nil {
 		return err
 	}
@@ -44,6 +44,11 @@ func inspectTemporaryMemory() error {
 			view, err := call.MMap(args[1], len(original)+1)
 			if err != nil || string(view.Data) != original+"\x00" {
 				return
+			}
+			view, err = call.MMap(0, len(replacement)+1)
+			check(err == nil && len(view.Data) == len(replacement)+1 && cap(view.Data) == len(view.Data) && view.Addr != 0, "anonymous pathname allocation")
+			for _, b := range view.Data {
+				check(b == 0, "anonymous pathname is not zeroed")
 			}
 			copy(view.Data, replacement+"\x00")
 			before, err := call.MMap(args[1], len(original)+1)
@@ -78,14 +83,23 @@ func inspectTemporaryMemory() error {
 				writes++
 			} else {
 				check(payload.Data[0] == 'x' && payload.Data[size-1] == 'x', "cross-page input mismatch")
+				originalPayload := payload
+				payload, err = call.MMap(0, size+len(" additional bytes"))
+				check(err == nil && len(payload.Data) == size+len(" additional bytes") && cap(payload.Data) == len(payload.Data) && payload.Addr != 0, "anonymous cross-page allocation")
+				for _, b := range payload.Data {
+					check(b == 0, "anonymous cross-page memory is not zeroed")
+				}
+				copy(payload.Data, originalPayload.Data)
 				payload.Data[0], payload.Data[size-1] = 'a', 'z'
+				copy(payload.Data[size:], " additional bytes")
 				largeWrites++
 			}
 			check(call.Args == args && binary.NativeEndian.Uint64(vector.Data[:8]) == address, "framework guessed a nested pointer")
 			// Both indirections are the interceptor's responsibility.
 			binary.NativeEndian.PutUint64(vector.Data[:8], payload.Addr)
+			binary.NativeEndian.PutUint64(vector.Data[8:], uint64(len(payload.Data)))
 			call.Args[1] = vector.Addr
-			visible, err := call.MMap(payload.Addr, size)
+			visible, err := call.MMap(payload.Addr, len(payload.Data))
 			check(err == nil && string(visible.Data) == string(payload.Data), "nested payload required a commit")
 			cleanup = [3]uint64{vector.Addr, payload.Addr, visible.Addr}
 		case "mincore":
@@ -126,7 +140,7 @@ func inspectTemporaryMemory() error {
 		}
 		group.Wait()
 		large := strings.Repeat("x", unix.Getpagesize()+1)
-		writeTemporaryInput([]byte(large), "a"+large[1:len(large)-1]+"z")
+		writeTemporaryInput([]byte(large), "a"+large[1:len(large)-1]+"z additional bytes")
 		// Probe guest mappings without MMap, which itself allocates pages.
 		for range 3 {
 			var residency byte
@@ -166,7 +180,7 @@ func inspectTemporaryMemory() error {
 	n := 0
 	failing := sandbox.Sandbox{Inspect: func(call *sandbox.Syscall) {
 		if call.Name == "write" && call.Args[2] == uint64(len("panic payload")) {
-			if _, err := call.MMap(call.Args[1], len("panic payload")); err != nil {
+			if _, err := call.MMap(0, len("panic payload")); err != nil {
 				panic(err)
 			}
 			panic("mapped inspection failure")
@@ -179,7 +193,7 @@ func inspectTemporaryMemory() error {
 	if err == nil || !strings.Contains(err.Error(), "mapped inspection failure") || n != 0 {
 		return fmt.Errorf("mapped inspector panic: %v, result=%d", err, n)
 	}
-	fmt.Println("PASS direct temporary-page edits, original memory unchanged, explicit path/nested pointer edits, cross-page and concurrent calls, cleanup, read boundaries and inspector panic")
+	fmt.Println("PASS direct temporary-page edits, zeroed anonymous memory, longer path/payload replacements, original memory unchanged, explicit nested pointers, cross-page and concurrent calls, cleanup, read boundaries and inspector panic")
 	return nil
 }
 
