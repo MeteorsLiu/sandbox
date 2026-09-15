@@ -19,6 +19,12 @@ type Memory struct {
 	Addr uint64
 }
 
+// Malloc is shorthand for MMap(0, size). It allocates zeroed temporary Sentry
+// memory with the same lifetime and guest address semantics as MMap.
+func (s *Syscall) Malloc(size int) (Memory, error) {
+	return s.MMap(0, size)
+}
+
 // MMap allocates size bytes of temporary Sentry memory and returns a writable
 // mapping. Address zero allocates zeroed memory; a nonzero address copies guest
 // bytes into it. Editing Data does not change the original memory.

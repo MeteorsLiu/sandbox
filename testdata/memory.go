@@ -45,7 +45,7 @@ func inspectTemporaryMemory() error {
 			if err != nil || string(view.Data) != original+"\x00" {
 				return
 			}
-			view, err = call.MMap(0, len(replacement)+1)
+			view, err = call.Malloc(len(replacement) + 1)
 			check(err == nil && len(view.Data) == len(replacement)+1 && cap(view.Data) == len(view.Data) && view.Addr != 0, "anonymous pathname allocation")
 			for _, b := range view.Data {
 				check(b == 0, "anonymous pathname is not zeroed")
@@ -84,7 +84,7 @@ func inspectTemporaryMemory() error {
 			} else {
 				check(payload.Data[0] == 'x' && payload.Data[size-1] == 'x', "cross-page input mismatch")
 				originalPayload := payload
-				payload, err = call.MMap(0, size+len(" additional bytes"))
+				payload, err = call.Malloc(size + len(" additional bytes"))
 				check(err == nil && len(payload.Data) == size+len(" additional bytes") && cap(payload.Data) == len(payload.Data) && payload.Addr != 0, "anonymous cross-page allocation")
 				for _, b := range payload.Data {
 					check(b == 0, "anonymous cross-page memory is not zeroed")

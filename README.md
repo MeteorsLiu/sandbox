@@ -56,7 +56,9 @@ The default library is `sentrylib.so` beside the executable. One library remains
 
 `MMap(address, size)` creates independent temporary pages in the guest's Sentry memory manager. Address `0` allocates `size` zeroed bytes without reading guest memory; a nonzero address initializes the pages from the requested guest bytes. `Memory.Data` directly maps those temporary pages into the host, while `Memory.Addr` is their guest address. Editing `Data` changes the temporary pages immediately and leaves the original guest memory unchanged. Initialization from a source copies bytes inside Sentry; this is not copy-on-write. There is no host staging buffer or copy-back step. Anonymous allocation requires `sentry/v0.3.0` or later; `sentry/v0.2.0` does not support it.
 
-**Pointer safety:** When `Inspect` injects a new syscall buffer, it must allocate that buffer through `MMap` and use the returned `Memory.Addr` for pointer arguments and nested pointers such as `iovec.base` or entries in `argv`. Never inject addresses of host Go objects, Go slice/string backing memory, `C.CString`/`C.malloc` allocations, or `Memory.Data` itself. `Data` is only the host view used to access the temporary pages; converting its pointer to `uintptr` does not produce a guest address.
+`Malloc(size)` is shorthand for `MMap(0, size)`: use it for a new zeroed buffer, and use `MMap(address, size)` to initialize a buffer from existing guest memory. Both return the same `Memory` view and follow the same lifetime rules.
+
+**Pointer safety:** When `Inspect` injects a new syscall buffer, it must allocate that buffer through `Malloc` or `MMap` and use the returned `Memory.Addr` for pointer arguments and nested pointers such as `iovec.base` or entries in `argv`. Never inject addresses of host Go objects, Go slice/string backing memory, `C.CString`/`C.malloc` allocations, or `Memory.Data` itself. `Data` is only the host view used to access the temporary pages; converting its pointer to `uintptr` does not produce a guest address.
 
 Sentry interprets syscall pointers in the guest address space. A host address can cause `EFAULT` or refer to unrelated guest memory, causing unintended reads or writes; exposing it also leaks a host address. Treat injecting host pointers as a security bug. Copying intended payload bytes from host memory into `Data` is allowed, but do not copy Go slice/string headers or structs containing host pointers as syscall data. Encode their pointer fields explicitly with guest addresses. The interceptor owns this rule; raw register edits are not checked for host-pointer provenance.
 
@@ -75,7 +77,7 @@ Inside `Inspect`:
 
 ```go
 const replacement = "/tmp/longer-replacement"
-view, err := call.MMap(0, len(replacement)+1)
+view, err := call.Malloc(len(replacement)+1)
 if err != nil {
     panic(err)
 }
@@ -125,7 +127,7 @@ binary.NativeEndian.PutUint64(vector.Data[:8], payload.Addr)
 call.Args[1] = vector.Addr
 ```
 
-Returning from `Inspect` submits the edited registers. There is no separate allocator, `Commit`, or `WriteMemory`. The host view is borrowed only until the callback returns and must not contain host Go or C pointers. These views replace synchronous syscall inputs; syscall outputs are not copied back to the original buffers. For nonzero addresses, the returned size is limited to readable source bytes. Use `MMap(0, size)` when a replacement needs more space.
+Returning from `Inspect` submits the edited registers. There is no `Commit` or `WriteMemory`. The host view is borrowed only until the callback returns and must not contain host Go or C pointers. These views replace synchronous syscall inputs; syscall outputs are not copied back to the original buffers. For nonzero addresses, the returned size is limited to readable source bytes. Use `Malloc(size)` (equivalently, `MMap(0, size)`) when a replacement needs more space.
 
 Reads respect guest permissions and may return a shorter `Data` slice together with an error. Zero length returns an empty view. Access after the callback returns fails. Use the view synchronously and do not concurrently modify event fields. Other guest threads can change source memory, so this is not an atomic snapshot. Read errors do not automatically deny the syscall.
 
