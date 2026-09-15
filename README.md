@@ -56,18 +56,34 @@ The default library is `sentrylib.so` beside the executable. One library remains
 
 `MMap(address, size)` creates independent temporary pages in the guest's Sentry memory manager and initializes them from the requested guest bytes. `Memory.Data` directly maps those temporary pages into the host, while `Memory.Addr` is their guest address. Editing `Data` changes the temporary pages immediately and leaves the original guest memory unchanged. Initialization copies bytes inside Sentry; this is not copy-on-write. There is no host staging buffer or copy-back step.
 
-For an `openat` whose original pathname is `/tmp/input`:
+For an `openat` whose original pathname is `/tmp/input`, use `C.CString` to create the replacement. Both example paths have the same byte length. Add the cgo declaration and `unsafe` import to the file:
 
 ```go
-view, err := call.MMap(call.Args[1], len("/tmp/input\x00"))
+/*
+#include <stdlib.h>
+*/
+import "C"
+
+import "unsafe"
+```
+
+Inside `Inspect`:
+
+```go
+const replacement = "/tmp/other"
+view, err := call.MMap(call.Args[1], len("/tmp/input")+1)
 if err != nil {
     panic(err)
 }
-copy(view.Data, "/tmp/other\x00")
+cpath := C.CString(replacement)
+defer C.free(unsafe.Pointer(cpath))
+copy(view.Data, unsafe.Slice((*byte)(unsafe.Pointer(cpath)), len(replacement)+1))
 call.Args[1] = view.Addr
 ```
 
-To read the pathname as a Go string, use cgo's `C.GoString`. In a file with `import "C"` and imports for `bytes`, `fmt` and `unsafe`, the view above can be read inside `Inspect`:
+`C.CString` supplies the terminating NUL; the copy includes that extra byte. `C.free` releases the host C allocation after the callback returns. The temporary guest pages keep their own copy.
+
+To read the pathname as a Go string, use cgo's `C.GoString`. With additional imports for `bytes` and `fmt`, the view above can be read inside `Inspect`:
 
 ```go
 if bytes.IndexByte(view.Data, 0) < 0 {
