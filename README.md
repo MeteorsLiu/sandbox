@@ -67,6 +67,19 @@ copy(view.Data, "/tmp/other\x00")
 call.Args[1] = view.Addr
 ```
 
+To read the pathname as a Go string, use cgo's `C.GoString`. In a file with `import "C"` and imports for `bytes`, `fmt` and `unsafe`, the view above can be read inside `Inspect`:
+
+```go
+if bytes.IndexByte(view.Data, 0) < 0 {
+    fmt.Println("pathname has no NUL within mapped bytes")
+    return
+}
+path := C.GoString((*C.char)(unsafe.Pointer(unsafe.SliceData(view.Data))))
+fmt.Println(path) // /tmp/other
+```
+
+Check for a NUL within `Data` before calling `C.GoString`, which otherwise reads until it finds one. The resulting Go string is a copy and may outlive the callback. `C.CString` does the reverse conversion and allocates separate host C memory; its pointer is not a guest address.
+
 The interceptor explicitly assigns guest addresses to arguments and nested pointers. The library never scans integers or guesses which values are pointers. For a Linux AMD64/ARM64 `writev` with one iovec containing the 5-byte payload `hello`:
 
 ```go
@@ -129,6 +142,66 @@ Run returns
 ```
 
 The wrapper remains at `Context.Switch`; the sysmsg/Sentry shared-memory and futex implementation is unchanged. DirectFS uses an in-process LISAFS service, without a separate gofer process. The current root filesystem is the host `/`, mounted read-only in the guest. This is not yet a file-visibility policy or a reproducible build environment.
+
+### Third-Party strace Formatting
+
+[u-root's strace package](https://github.com/u-root/u-root/blob/v0.16.0/pkg/strace/syscall_linux.go) exposes `SysCallEnter` and a `Task` interface with `Name` and `Read` methods. The interceptor can adapt `MMap` to that interface and format `openat` from its number and raw arguments. Add `github.com/u-root/u-root/pkg/strace@v0.16.0` to the calling application's module:
+
+```go
+import (
+    "encoding/binary"
+    "fmt"
+
+    "github.com/u-root/u-root/pkg/strace"
+    "github.com/xgo-dev/sandbox"
+)
+
+type traceTask struct {
+    call *sandbox.Syscall
+}
+
+func (t traceTask) Name() string { return "guest" }
+
+func (t traceTask) Read(addr strace.Addr, dst any) (int, error) {
+    size := binary.Size(dst)
+    if size < 0 {
+        return 0, fmt.Errorf("unsupported strace destination %T", dst)
+    }
+    view, err := t.call.MMap(uint64(addr), size)
+    if err != nil {
+        return len(view.Data), err
+    }
+    return binary.Decode(view.Data, binary.NativeEndian, dst)
+}
+
+func printSyscall(call *sandbox.Syscall) {
+    if call.Name != "openat" {
+        return
+    }
+    event := strace.SyscallEvent{Sysno: int(call.Number)}
+    for i, arg := range call.Args {
+        event.Args[i].Value = uintptr(arg)
+    }
+    fmt.Println(strace.SysCallEnter(traceTask{call}, &event))
+}
+```
+
+Use it as the host interceptor:
+
+```go
+s := sandbox.Sandbox{Inspect: printSyscall}
+err := s.Run(fn) // for example, fn calls os.ReadFile("/etc/hostname")
+```
+
+An observed Linux ARM64 entry (addresses vary):
+
+```text
+guest E openat(0xffffffffffffff9c, 0x56793be86040 /etc/hostname, O_RDONLY|O_CLOEXEC, ----------)
+```
+
+Formatting runs in the host callback; it needs no ptrace attachment or Sentry decoder. u-root chooses its syscall table for the build architecture. This example formats syscall entry arguments; `Inspect` runs before execution, so return values and `read` output are unavailable there.
+
+The adapter handles the byte slices used for pathnames and other fixed-size values accepted by `encoding/binary`. Layouts containing `uintptr` require additional caller-side decoding. u-root v0.16.0 reads strings one byte at a time, so this simple adapter creates a temporary mapping for each byte; account for that cost before using it for high-volume tracing.
 
 ## Reading Order
 
