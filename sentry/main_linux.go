@@ -21,8 +21,8 @@ import (
 
 var libraryMu sync.Mutex
 
-//export RunSandbox
-func RunSandbox(guest *C.char, imageFD C.int, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
+//export RunSandboxAt
+func RunSandboxAt(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
 	libraryMu.Lock()
 	defer libraryMu.Unlock()
 	runtime.LockOSThread()
@@ -41,7 +41,7 @@ func RunSandbox(guest *C.char, imageFD C.int, owner C.uintptr_t, callback C.insp
 			report(fmt.Errorf("Sentry startup panicked: %v", v))
 		}
 	}()
-	err := runSentry("/", C.GoString(guest), int(imageFD), func(_ gcontext.Context, _ platform.MemoryManager, ac *arch.Context64) {
+	err := runSentry("/", C.GoString(guest), int(imageFD), uintptr(mainPC), uintptr(entryPC), func(_ gcontext.Context, _ platform.MemoryManager, ac *arch.Context64) {
 		event := C.struct_syscall_event{number: C.uint64_t(ac.SyscallNo())}
 		for i, arg := range ac.SyscallArgs() {
 			event.args[i] = C.uint64_t(arg.Uint64())

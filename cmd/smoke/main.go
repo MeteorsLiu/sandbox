@@ -18,6 +18,9 @@ type node struct {
 	Next  *node
 }
 
+var initializedPID = os.Getpid()
+var enteredMain bool
+
 func check(ok bool, message string) {
 	if !ok {
 		panic(message)
@@ -26,13 +29,7 @@ func check(ok bool, message string) {
 func staticCall() { runtime.GC() }
 
 func main() {
-	if handled, err := sandbox.Guest(); handled {
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
-	}
+	enteredMain = true
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -44,11 +41,15 @@ func run() error {
 	s := sandbox.Sandbox{Inspect: func(call *sandbox.Syscall) { calls.Add(1) }}
 	n := 41
 	pid := os.Getpid()
-	if err := s.Run(func() { n++; runtime.GC() }); err != nil {
+	if err := s.Run(func() {
+		check(!enteredMain && initializedPID == os.Getpid(), "guest must run package init and skip main")
+		n++
+		runtime.GC()
+	}); err != nil {
 		return fmt.Errorf("integer: %w", err)
 	}
 	check(n == 42 && os.Getpid() == pid, "integer writeback/host identity")
-	fmt.Println("PASS integer capture, host PID, GC, and Switch inspector")
+	fmt.Println("PASS automatic guest entry after init, integer capture, host PID, GC, and Switch inspector")
 
 	a := &node{Value: 1}
 	a.Next = a

@@ -11,16 +11,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const guestArgument = "--llar-sandbox-guest"
-
-// Guest runs the imported closure when this process is Sentry's guest. Call it
-// at the start of main, and exit on handled=true, including when err is nil.
-// Do not call it from init: c-shared callbacks require completed Go init.
-func Guest() (handled bool, err error) {
-	if len(os.Args) != 2 || os.Args[1] != guestArgument {
-		return false, nil
+// guestEntry replaces main.main in the guest after Go package initialization.
+// Its address is passed by Run, keeping this entry and its dependencies linked.
+//
+//go:noinline
+func guestEntry() {
+	if err := runGuest(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	handled = true
+}
+
+func runGuest() (err error) {
 	defer func() {
 		if value := recover(); value != nil {
 			err = fmt.Errorf("sandbox guest panicked: %v", value)
@@ -28,39 +30,39 @@ func Guest() (handled bool, err error) {
 	}()
 	m, err := loadMetadata()
 	if err != nil {
-		return true, err
+		return err
 	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(3, &stat); err != nil {
-		return true, err
+		return err
 	}
 	if stat.Size != 2*imageBytes {
-		return true, fmt.Errorf("invalid sandbox image size %d", stat.Size)
+		return fmt.Errorf("invalid sandbox image size %d", stat.Size)
 	}
 	mem, err := unix.Mmap(3, 0, 2*imageBytes, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
-		return true, err
+		return err
 	}
 	defer unix.Munmap(mem)
 	defer unix.Close(3)
 	functions := make(map[uintptr]nativeLayout)
 	in := newImage(append([]byte(nil), mem[:imageBytes]...), m, functions)
 	if err := in.header(); err != nil {
-		return true, err
+		return err
 	}
 	if err := in.authorizeFunctions(); err != nil {
-		return true, err
+		return err
 	}
 	fn, retained, err := in.decode(nil)
 	if err != nil {
-		return true, err
+		return err
 	}
 	fn.Interface().(func())()
 	out := newImage(mem[imageBytes:], m, functions)
 	if _, err := out.encode(fn, retained); err != nil {
-		return true, err
+		return err
 	}
 	binary.LittleEndian.PutUint64(mem[imageBytes+48:], 1)
 	runtime.KeepAlive(retained)
-	return true, nil
+	return nil
 }

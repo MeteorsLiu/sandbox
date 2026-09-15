@@ -28,17 +28,21 @@ The workflow can also be dispatched with an existing Sentry tag to retry a faile
 ## C Entry
 
 ```c
-int RunSandbox(char *guest, int image_fd, uintptr_t owner,
-               inspect_fn inspect, char *message, size_t capacity);
+int RunSandboxAt(char *guest, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
+                 uintptr_t owner, inspect_fn inspect, char *message, size_t capacity);
 ```
 
-- `guest` is the guest executable's absolute path. Sentry starts it with the argument `--llar-sandbox-guest`.
+- `guest` is the guest executable's absolute path. Sentry starts it with that path as `argv[0]` and no extra arguments.
 - `image_fd` is a caller-owned descriptor imported as guest fd 3. The library does not interpret its contents. Guest fd 0, 1 and 2 are imported from host stdin, stdout and stderr.
+- `main_pc` is the guest virtual address to redirect; the caller supplies its `main.main` address. The caller must verify that the symbol contains at least 5 bytes on AMD64 or 4 bytes on ARM64. Before starting guest tasks, the library writes a relative branch into this private executable mapping using Sentry's existing memory manager.
+- `entry_pc` is the guest virtual address of the caller's private, non-capturing Go `func()` startup entry. It runs after Go package initialization and returns after exporting closure results. The caller owns ELF symbol resolution, guest code and value reconstruction. The library checks branch range and alignment; it does not interpret the closure image. Unsupported branch layouts fail before creating the guest.
 - `owner` is an opaque integer passed unchanged to `inspect`. A Go caller can use a `cgo.Handle` owned by its own runtime.
 - `inspect` is a required synchronous callback. It receives a borrowed `syscall_event` containing the syscall number and six arguments, and may change those integers before returning. Guest pointer arguments must not be dereferenced in the host.
 - `message` is a writable error buffer of `capacity` bytes. A nonzero result indicates an error; zero means that the guest exited successfully.
 
-All supplied strings, buffers and callback state must remain valid until `RunSandbox` returns. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
+All supplied strings, buffers and callback state must remain valid until `RunSandboxAt` returns. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
+
+`RunSandboxAt` replaces the `RunSandbox` symbol from `sentry/v0.1.0`. This revision is unreleased and requires a matching host build. Distinct symbols make an incompatible host/library combination fail during symbol lookup rather than calling an incompatible C signature.
 
 ```text
 guest syscall

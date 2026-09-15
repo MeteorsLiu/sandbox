@@ -4,14 +4,6 @@
 
 ```go
 func main() {
-    if handled, err := sandbox.Guest(); handled {
-        if err != nil {
-            fmt.Fprintln(os.Stderr, err)
-            os.Exit(1)
-        }
-        return
-    }
-
     count := 41
     if err := sandbox.Run(func() { count++ }); err != nil {
         panic(err)
@@ -20,7 +12,7 @@ func main() {
 }
 ```
 
-Call `Guest` from `main`, after Go package initialization has completed. A new guest executes package initialization again; initialization side effects must be appropriate there. Captured objects must be exclusively owned until `Run` returns. The function must finish its own goroutines before returning. Concurrent or nested host calls return an error.
+Guest startup is internal to the library. A new guest executes Go runtime and package initialization, then enters the imported closure without executing the application's `main`. Initialization side effects must be appropriate there. Captured objects must be exclusively owned until `Run` returns. The function must finish its own goroutines before returning. Concurrent or nested host calls return an error.
 
 ## Modules
 
@@ -31,7 +23,9 @@ github.com/xgo-dev/sandbox           sandbox.Run(fn), guest entry, value transfe
 github.com/xgo-dev/sandbox/sentry    c-shared Sentry backend -> sentrylib.so
 ```
 
-Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through `dlopen` and does not import the Sentry module or gVisor. Each module carries its own C ABI declarations so either module can be fetched independently. The ABI contains integer syscall fields and a synchronous callback.
+Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through `dlopen` and does not import the Sentry module or gVisor. Each module carries its own C ABI declarations so either module can be fetched independently. The ABI carries guest startup addresses, integer syscall fields and a synchronous callback.
+
+Automatic guest startup requires the new `RunSandboxAt` library symbol. Rebuild the Sentry module together with this host revision; the published `sentry/v0.1.0` library exports the older `RunSandbox` entry and is rejected with an explicit loading error. This change has not been released.
 
 LLAR's formula integration stays in its own repository at `experimental/sandbox-formula`, where it can use LLAR's internal formula loader. The sandbox library has no LLAR or ixgo dependency.
 
@@ -55,11 +49,13 @@ Host runtime                           c-shared Sentry runtime
 Run(fn)
   closure + reachable values
        |
-       +-- memfd, guest fd 3 ----------> CreateProcess(same ELF)
+       +-- memfd, startup addresses ---> CreateProcess(same ELF), guest fd 3
                                            |
-                                      guest main -> Guest()
+                                      install main -> guestEntry branch
                                            |
-                                      reconstruct captures -> fn()
+                                      Start -> Go runtime and package init
+                                           |
+                                      guestEntry -> reconstruct captures -> fn()
                                            |
                                       syscall -> seccomp/SIGSYS
                                            |
@@ -85,11 +81,11 @@ The wrapper remains at `Context.Switch`; the sysmsg/Sentry shared-memory and fut
 ## Reading Order
 
 1. [host_linux.go](host_linux.go): public `Run`, image ownership, c-shared call, validation and return.
-2. [guest_linux.go](guest_linux.go): guest detection, value restoration, closure invocation and result export.
+2. [guest_linux.go](guest_linux.go): private guest entry, value restoration, closure invocation and result export.
 3. [transfer_linux.go](transfer_linux.go): retained object identities and host writeback.
 4. [image_linux.go](image_linux.go): typed graph traversal and relative image offsets.
 5. [native_linux.go](native_linux.go): ELF/DWARF type and closure metadata, GC allocation/layout checks.
-6. [sentry/run_linux.go](sentry/run_linux.go) and [sentry/platform_linux.go](sentry/platform_linux.go): startup and syscall interception.
+6. [sentry/run_linux.go](sentry/run_linux.go), `sentry/entry_{amd64,arm64}.go` and [sentry/platform_linux.go](sentry/platform_linux.go): guest entry redirection, startup and syscall interception.
 
 The Sentry build and C entry contract are described in [sentry/README.md](sentry/README.md).
 
@@ -112,6 +108,7 @@ This is an executable module with a general `func()` entry, not yet a production
 
 - Native Sentry execution is verified on Linux ARM64 with 4 KiB pages and Go 1.26.6. AMD64 builds and value-transfer tests pass under emulation; native AMD64 Sentry execution and other page sizes require validation. The unsupported entry builds on macOS and Windows; these are not Sentry execution targets.
 - Private Go runtime ABI checks currently require exactly Go 1.26.6. Dynamic reflect types, generic dictionaries and bound method wrappers are not supported.
+- Guest entry redirection requires the `main.main` ELF symbol to contain at least 5 bytes on AMD64 or 4 bytes on ARM64. The private entry must be reachable by a relative jump (signed 32-bit displacement on AMD64, signed 28-bit byte displacement aligned to 4 bytes on ARM64). Unsupported layouts return an error before the guest starts. Only the guest's private executable mapping is patched; the host mapping and executable file are unchanged.
 - Channels, non-nil `unsafe.Pointer`, synchronization primitives, timers, cancellation contexts and open file objects cannot be transferred as ordinary values. Known process-local structures are rejected. This is not an exhaustive resource classifier for arbitrary third-party types.
 - Package global state, goroutines, stacks, file descriptors and singleton identity such as `io.EOF` are not migrated. `uintptr` stays an integer; pointers hidden inside it are not relocated.
 - Shared pointer/map identities, exact slice aliases and cycles are retained. Overlapping slices and some interior-pointer traversal orders are rejected. Each input/output image currently has a 16 MiB limit and a traversal depth limit of 256.
@@ -124,6 +121,6 @@ This is an executable module with a general `func()` entry, not yet a production
 
 `sentry/build-linux.sh` builds only the shared library and its C headers. The root `build-linux.sh` builds the generic call smoke test and value-transfer tests, and checks that the host dependency list contains no gVisor packages. Neither script builds the other module.
 
-The Linux ARM64 smoke test passes integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. After warming the shared platform, repeated calls retain a stable count of 17 host descriptors in the tested environment.
+The smoke test covers automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. It also checks for descriptor growth after warming the shared platform.
 
 LLAR's separate formula integration passes `OnBuild(ctx)` with both `Project.ReadFile` and `os.ReadFile`, a native output-directory callback, and result writeback to the original `Context` and `Project`. Both ARM64 and emulated AMD64 value-transfer tests reject malformed lengths, unauthorized code entries, unknown types, changed retention counts, merged identities and overlapping slices without changing host captures.

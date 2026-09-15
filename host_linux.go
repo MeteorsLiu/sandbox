@@ -59,8 +59,9 @@ func headerWord(mem []byte, offset int) uintptr {
 	return uintptr(binary.LittleEndian.Uint64(mem[offset : offset+8]))
 }
 
-// Run executes fn in a fresh guest running the same ELF. Call Guest from main
-// first. Capture mutations are committed only after a successful guest exit.
+// Run executes fn in a fresh guest running the same ELF. The guest enters the
+// closure automatically after package initialization, without running main.
+// Capture mutations are committed only after a successful guest exit.
 // Captures must be exclusively owned for the duration of Run. Calls cannot
 // overlap because the embedded Sentry runtime owns process-wide resources.
 func (s *Sandbox) Run(fn func()) error {
@@ -78,6 +79,14 @@ func (s *Sandbox) Run(fn func()) error {
 	if err != nil {
 		return err
 	}
+	jumpSize := uint64(4)
+	if runtime.GOARCH == "amd64" {
+		jumpSize = 5
+	}
+	if m.mainPC == 0 || m.mainSize < jumpSize {
+		return fmt.Errorf("sandbox needs a main.main ELF symbol with at least %d bytes", jumpSize)
+	}
+	entryPC := reflect.ValueOf(guestEntry).Pointer()
 	fd, err := unix.MemfdCreate("llar-sandbox", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
 		return err
@@ -124,7 +133,7 @@ func (s *Sandbox) Run(fn func()) error {
 	handle := cgo.NewHandle(i)
 	defer handle.Delete()
 	var message [4096]C.char
-	code := C.sandbox_load(cLibrary, cExecutable, C.int(fd), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
+	code := C.sandbox_load(cLibrary, cExecutable, C.int(fd), C.uintptr_t(m.mainPC), C.uintptr_t(entryPC), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
 	if code != 0 {
 		return fmt.Errorf("sandbox Sentry: %s", C.GoString(&message[0]))
 	}
@@ -137,7 +146,7 @@ func (s *Sandbox) Run(fn func()) error {
 	// Never parse guest-writable memory while changing host objects.
 	output := append([]byte(nil), mem[imageBytes:]...)
 	if headerWord(output, 48) != 1 {
-		return fmt.Errorf("sandbox guest did not publish a completed result; call sandbox.Guest from main")
+		return fmt.Errorf("sandbox guest did not publish a completed result")
 	}
 	out := newImage(output, m, functions)
 	if err := out.commit(w.anchors); err != nil {

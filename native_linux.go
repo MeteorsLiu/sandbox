@@ -46,6 +46,8 @@ type nativeMetadata struct {
 	captures  map[uintptr][]capture
 	readOnly  [][2]uintptr
 	typeStart uintptr
+	mainPC    uintptr
+	mainSize  uint64
 }
 
 func loadMetadata() (*nativeMetadata, error) {
@@ -77,6 +79,11 @@ func loadMetadata() (*nativeMetadata, error) {
 			m.typeStart = uintptr(s.Value)
 		case "runtime.etypes":
 			end = uintptr(s.Value)
+		case "main.main":
+			if elf.ST_TYPE(s.Info) == elf.STT_FUNC {
+				m.mainPC = uintptr(s.Value)
+				m.mainSize = s.Size
+			}
 		}
 	}
 	if m.typeStart == 0 || end <= m.typeStart {

@@ -7,15 +7,21 @@ import (
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
-func runSentry(root, executable string, imageFD int, inspect inspector) error {
+func runSentry(root, executable string, imageFD int, mainPC, entryPC uintptr, inspect inspector) error {
 	if executable == "" {
 		return errors.New("guest executable is required")
+	}
+	jump, err := entryJump(mainPC, entryPC)
+	if err != nil {
+		return err
 	}
 	ioFD, stopFilesystem, err := startFilesystem(root)
 	if err != nil {
@@ -50,7 +56,7 @@ func runSentry(root, executable string, imageFD int, inspect inspector) error {
 	// reference above remains valid for cleanup on both success and failure.
 	mntns.IncRef()
 	tg, _, err := k.CreateProcess(kernel.CreateProcessArgs{
-		Filename: executable, Argv: []string{executable, "--llar-sandbox-guest"},
+		Filename: executable, Argv: []string{executable},
 		WorkingDirectory: "/",
 		Credentials:      auth.NewUserCredentials(1000, 1000, nil, &auth.TaskCapabilities{}, k.RootUserNamespace()),
 		FDTable:          fdt, Umask: 0022, Limits: ls,
@@ -60,6 +66,13 @@ func runSentry(root, executable string, imageFD int, inspect inspector) error {
 	})
 	if err != nil {
 		return fmt.Errorf("loading guest: %w", err)
+	}
+
+	// Patch only the guest's private ELF mapping, before any guest task runs.
+	// Go initializes its runtime and packages, then main.main branches to entryPC.
+	_, err = tg.Leader().MemoryManager().CopyOut(ctx, hostarch.Addr(mainPC), jump, usermem.IOOpts{IgnorePermissions: true})
+	if err != nil {
+		return fmt.Errorf("installing guest entry: %w", err)
 	}
 
 	dog := watchdog.New(k, watchdog.DefaultOpts)
