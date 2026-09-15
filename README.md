@@ -1,6 +1,6 @@
 # Sandbox
 
-`sandbox.Run(fn)` runs a native Go closure in Sentry, then writes changes to captured objects back into the original host objects. The host and guest run the same executable. Native types and code come from that ELF; captured values travel through a memfd. There is no CRIU checkpoint, global STW, or RPC callback proxy in this path.
+`sandbox.Run(fn)` runs a Go closure in Sentry, then writes changes to captured objects back into the original host objects. Captures can include existing ixgo callbacks. The host and guest run the same executable. Native types and code come from that ELF; captured values and ixgo program descriptions travel through a memfd. There is no CRIU checkpoint, global STW, or RPC callback proxy in this path.
 
 ```go
 func main() {
@@ -28,7 +28,34 @@ Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through
 
 The C entry is `RunSandbox`. This host API requires the Sentry ABI introduced in `sentry/v0.2.0`; the `sentry/v0.1.0` library is incompatible. Build the host and Sentry from the same source revision. Go module version selection does not check the ABI of a library loaded through `dlopen`.
 
-LLAR's formula integration stays in its own repository at `experimental/sandbox-formula`, where it can use LLAR's internal formula loader. The sandbox library has no LLAR or ixgo dependency.
+The sandbox module depends on ixgo for rebuilding interpreted closures. It does not depend on LLAR or gVisor. LLAR can continue using its own formula loader and pass an already loaded callback through the ordinary `Run` entry.
+
+## Interpreted Closures
+
+An existing interpreted callback can appear inside a native closure, a struct, an interface or another callback's environment. For example, with an already loaded LLAR formula and build context:
+
+```go
+err := sandbox.Run(func() {
+    f.OnBuild(ctx)
+})
+```
+
+The transfer layer unwraps `reflect.MakeFunc` and checks ixgo's callback entry before reading its interpreter, function and captured environment. Each host interpreter gets its own guest interpreter. The scanner follows ordinary captures through native wrappers, including LLAR's callback lifetime wrapper; it does not copy ixgo's scheduler, locks or frame caches.
+
+| Stage | Data and behavior |
+| --- | --- |
+| Host export | Keep the loaded Go source for interpreted packages, interpreter mode, SSA function identities and per-context external bindings. Scan captures, class instances and interpreted-package globals with one object identity table. |
+| Guest setup | Run normal executable package initialization, restore native external bindings, load the saved source and create ixgo interpreters. Do not replay interpreted `RunInit`, class initialization or closure factories. |
+| Type resolution | Reuse native ELF types. Resolve interpreted types against the rebuilt program, including local declaration and instance identity, and reconstruct unnamed composite types. Dynamic type addresses never cross the process boundary. |
+| Value restoration | Restore the object graph and bind captured environments to the corresponding guest functions. Preserve shared cells, cycles and interface dynamic values. Explicit `reflect.Type` values become type references; addressable `reflect.Value` values refer to restored storage. |
+| Execution | Call the original outer closure. Interpreted code and native callbacks execute in the guest; syscalls use the existing Sentry context-switch inspector. |
+| Host return | Check the returned program, type and function identities before writeback. Update original objects and interpreted globals. Bind returned ixgo closures to the original host interpreter, preserving captured-cell aliases. |
+
+Standard `os.Stdin`, `os.Stdout` and `os.Stderr` references are rebound to the corresponding runtime's standard streams, matching Sentry's existing descriptor imports. Their `os.File` internals are not copied. Other open files remain unsupported.
+
+The interpreter, its captures and its global variables must remain exclusively owned until `Run` returns. Native package registrations must also be present after guest package initialization. Per-context `RegisterExternal` native functions and variable bindings are transferred; bindings that themselves require an interpreted type or ixgo callback before that interpreter exists are rejected. Custom execution/debug hooks, REPL contexts, inaccessible source and ambiguous type/function identities are rejected. A custom importer is not reconstructed; interpreted source dependencies are included in the image.
+
+This path uses ixgo v1.1.6 private layouts and entry points together with the pinned Go toolchain. Methods, local generic types and new closures from an existing interpreted program are covered by transfer tests; this is not a claim that every generic or reflection operation is supported. Restricted `reflect.Value` access, native generic dictionaries, and incomplete native closure DWARF remain unsupported. A guest cannot introduce a new interpreter/program into the host on return.
 
 ## Host Inspection
 
@@ -266,12 +293,12 @@ Systrap needs host-kernel support for its ptrace/seccomp setup. A surrounding co
 This is an executable module with a general `func()` entry, not yet a production sandbox for arbitrary Go programs or general Linux installations.
 
 - Native Sentry execution is verified on Linux ARM64 with 4 KiB pages and Go 1.26.6. AMD64 builds and value-transfer tests pass under emulation; native AMD64 Sentry execution and other page sizes require validation. The unsupported entry builds on macOS and Windows; these are not Sentry execution targets.
-- Private Go runtime ABI checks currently require exactly Go 1.26.6. Dynamic reflect types, generic dictionaries and bound method wrappers are not supported.
+- Private Go runtime ABI checks currently require exactly Go 1.26.6; ixgo integration targets v1.1.6. Interpreted dynamic types and unnamed composites are resolved during transfer. Native generic dictionaries and bound method wrappers remain unsupported.
 - Guest entry redirection requires the `main.main` ELF symbol to contain at least 5 bytes on AMD64 or 4 bytes on ARM64. The private entry must be reachable by a relative jump (signed 32-bit displacement on AMD64, signed 28-bit byte displacement aligned to 4 bytes on ARM64). Unsupported layouts return an error before the guest starts. Only the guest's private executable mapping is patched; the host mapping and executable file are unchanged.
 - Channels, non-nil `unsafe.Pointer`, synchronization primitives, timers, cancellation contexts and open file objects cannot be transferred as ordinary values. Known process-local structures are rejected. This is not an exhaustive resource classifier for arbitrary third-party types.
-- Package global state, goroutines, stacks, file descriptors and singleton identity such as `io.EOF` are not migrated. `uintptr` stays an integer; pointers hidden inside it are not relocated.
+- Interpreted-package globals are migrated. Native package global state, goroutines, stacks, arbitrary file descriptors and singleton identity such as `io.EOF` are not migrated. Standard stream references are rebound as described above. `uintptr` stays an integer; pointers hidden inside it are not relocated.
 - Shared pointer/map identities, exact slice aliases and cycles are retained. Overlapping slices and some interior-pointer traversal orders are rejected. Each input/output image currently has a 16 MiB limit and a traversal depth limit of 256.
-- Native functions already reachable from the input are authorized for host result restoration. Returning a newly created function with a previously unseen code entry is rejected.
+- Native functions already reachable from the input are authorized for host result restoration. Returning a native function with a previously unseen code entry is rejected. A returned ixgo closure must belong to an original transferred program and its known function set.
 - Input objects stay alive through the call. Imported objects stay alive in the guest even after the closure drops its reference, so their mutations can still reach host aliases. Result decoding finishes before writeback starts; a guest panic, exit failure or malformed result prevents that writeback. External syscall side effects are not rolled back.
 - The shared library retains a Systrap platform and its process-lifetime workers. Each call creates a fresh Sentry kernel/guest. The two Go runtimes still share OS signal dispositions and the host process address space; c-shared isolates dependencies and runtime heaps, not hostile native code within the host.
 - Filesystem/environment policies, cancellation, comprehensive startup-failure cleanup, hostile-image fuzzing and a broader platform/toolchain matrix remain necessary before production use.
@@ -282,4 +309,6 @@ This is an executable module with a general `func()` entry, not yet a production
 
 The smoke test covers automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. It also checks for descriptor growth after warming the shared platform, guest path/buffer reads, raw syscall argument editing, invalid guest addresses and expired inspection access. Temporary-memory checks cover immediate visibility of host edits, zeroed anonymous allocations for longer path and buffer replacements, unchanged original guest bytes, explicit path and nested `writev` pointer replacement, cross-page data, concurrent calls, guest mapping cleanup and a panic after mapping memory.
 
-LLAR's separate formula integration passes `OnBuild(ctx)` with both `Project.ReadFile` and `os.ReadFile`, a native output-directory callback, and result writeback to the original `Context` and `Project`. Both ARM64 and emulated AMD64 value-transfer tests reject malformed lengths, unauthorized code entries, unknown types, changed retention counts, merged identities and overlapping slices without changing host captures.
+The interpreted integration in [testdata/ixgo.go](testdata/ixgo.go) creates the method callback on the host, then verifies class state, reflection, package globals, a real file-read syscall, writeback and continued host execution. Transfer tests also cover multiple interpreters, interpreted source dependencies, local generic types, external native closure aliases, returned ixgo closures and malformed output without partial host mutation.
+
+The separate LLAR check loads a classfile on the host before `Run`, calls its existing `OnBuild(ctx)` in Sentry with both `Project.ReadFile` and `os.ReadFile`, writes back a custom class counter and the native output-directory callback's captures, then calls the same formula again on the host. The real Sentry path is verified on ARM64. AMD64 value-transfer tests run under emulation; native AMD64 Sentry execution remains unverified.

@@ -47,18 +47,20 @@ func runGuest() (err error) {
 	defer unix.Close(3)
 	functions := make(map[uintptr]nativeLayout)
 	in := newImage(append([]byte(nil), mem[:imageBytes]...), m, functions)
-	if err := in.header(); err != nil {
+	if err := in.prepare(nil); err != nil {
 		return err
 	}
-	if err := in.authorizeFunctions(); err != nil {
+	bindings, err := in.globalBindings()
+	if err != nil {
 		return err
 	}
-	fn, retained, err := in.decode(nil)
+	fn, retained, err := in.decode(bindings)
 	if err != nil {
 		return err
 	}
 	fn.Interface().(func())()
 	out := newImage(mem[imageBytes:], m, functions)
+	out.inherit(in)
 	if _, err := out.encode(fn, retained); err != nil {
 		return err
 	}

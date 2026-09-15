@@ -4,12 +4,30 @@ package sandbox
 
 import (
 	"fmt"
+	"maps"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
 )
 
 const imageBytes = 16 << 20
+
+const standardStreamBit = uintptr(1) << 62
+
+// Sentry imports descriptors 0, 1 and 2. Rebind the corresponding standard Go
+// objects; os.File's locks and poller state belong to each runtime separately.
+func standardStream(v reflect.Value) uintptr {
+	if v.Type() != reflect.TypeFor[*os.File]() {
+		return 0
+	}
+	for i, f := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
+		if f != nil && v.Pointer() == reflect.ValueOf(f).Pointer() && f.Fd() == uintptr(i) {
+			return uintptr(i + 1)
+		}
+	}
+	return 0
+}
 
 func transferable(t reflect.Type) error {
 	// These values contain scheduler, OS, or synchronization relationships that
@@ -40,19 +58,37 @@ func (w *imageWriter) retain(key objectRef, value reflect.Value) {
 }
 
 func newImage(mem []byte, metadata *nativeMetadata, functions map[uintptr]nativeLayout) *valueImage {
-	return &valueImage{mem: mem, used: 4096, types: metadata.types, native: functions, metadata: metadata}
+	im := &valueImage{mem: mem, used: 4096, types: maps.Clone(metadata.types), typeIDs: make(map[reflect.Type]uintptr), native: functions, metadata: metadata}
+	for id, typ := range im.types {
+		im.typeIDs[typ] = id
+	}
+	return im
+}
+
+func (im *valueImage) inherit(from *valueImage) {
+	im.types, im.typeIDs = maps.Clone(from.types), maps.Clone(from.typeIDs)
+	im.typeDefs = append([]transferType(nil), from.typeDefs...)
+	im.programs = append([]*ixgoProgram(nil), from.programs...)
 }
 
 // encode writes the root, followed by roots retaining every imported object.
 // Retention preserves mutations such as `p.Value++; p = nil` for host aliases.
 func (im *valueImage) encode(fn reflect.Value, retained []reflect.Value) (*imageWriter, error) {
+	if err := im.discover(fn); err != nil {
+		return nil, err
+	}
 	im.used = 4096
+	clear(im.mem[:4096])
 	w := &imageWriter{valueImage: im, refs: make(map[objectRef]uintptr), retained: make(map[objectRef]bool)}
 	root, err := w.alloc(fn.Type().Size(), fn.Type().Align())
 	if err != nil {
 		return nil, err
 	}
 	if err := w.copy(snapshot(fn), root, "fn", 0); err != nil {
+		return nil, err
+	}
+	programs, err := w.programValues()
+	if err != nil {
 		return nil, err
 	}
 	var slots []uintptr
@@ -85,7 +121,11 @@ func (im *valueImage) encode(fn reflect.Value, retained []reflect.Value) (*image
 		return nil, err
 	}
 	for i, slot := range slots {
-		w.put(table+uintptr(i)*16, typeAddress(types[i]))
+		id, err := w.typeID(types[i])
+		if err != nil {
+			return nil, err
+		}
+		w.put(table+uintptr(i)*16, id)
 		w.put(table+uintptr(i)*16+8, slot)
 	}
 	functions, err := w.alloc(uintptr(len(im.native))*16, 8)
@@ -95,8 +135,15 @@ func (im *valueImage) encode(fn reflect.Value, retained []reflect.Value) (*image
 	i := uintptr(0)
 	for pc, layout := range im.native {
 		w.put(functions+i*16, pc)
-		w.put(functions+i*16+8, typeAddress(layout.signature))
+		id, err := w.typeID(layout.signature)
+		if err != nil {
+			return nil, err
+		}
+		w.put(functions+i*16+8, id)
 		i++
+	}
+	if err := w.metadataDescription(programs); err != nil {
+		return nil, err
 	}
 	w.put(0, root)
 	w.put(8, im.used)
@@ -151,7 +198,11 @@ func (im *valueImage) decode(bindings map[objectRef]reflect.Value) (reflect.Valu
 	if err := im.header(); err != nil {
 		return reflect.Value{}, nil, err
 	}
-	r := &imageReader{valueImage: im, refs: make(map[objectRef]reflect.Value), bindings: bindings}
+	refs := maps.Clone(im.initial)
+	if refs == nil {
+		refs = make(map[objectRef]reflect.Value)
+	}
+	r := &imageReader{valueImage: im, refs: refs, bindings: bindings}
 	fn := reflect.New(reflect.TypeFor[func()]()).Elem()
 	if err := r.copy(fn, headerWord(im.mem, 0), "fn", 0); err != nil {
 		return reflect.Value{}, nil, err
@@ -242,6 +293,19 @@ func (im *valueImage) commit(original []reflect.Value) error {
 		}
 		if v.Kind() == reflect.Func && v.Pointer() != a.Pointer() {
 			return fmt.Errorf("retained[%d] changed code entry", i)
+		}
+		if v.Kind() == reflect.Func {
+			before, err := im.metadata.ixgoCallback(a)
+			if err != nil {
+				return err
+			}
+			after, err := im.metadata.ixgoCallback(v)
+			if err != nil {
+				return err
+			}
+			if before != nil && (after == nil || before.interp != after.interp || before.pfn.Fn != after.pfn.Fn) {
+				return fmt.Errorf("retained[%d] changed ixgo function", i)
+			}
 		}
 		slot, _ := im.word(table + uintptr(i)*16 + 8)
 		key, err := im.bindingKey(v.Type(), slot)

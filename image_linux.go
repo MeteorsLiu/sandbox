@@ -5,6 +5,7 @@ package sandbox
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"reflect"
 	"runtime"
 	"unsafe"
@@ -20,6 +21,10 @@ type valueImage struct {
 	types    map[uintptr]reflect.Type
 	metadata *nativeMetadata
 	native   map[uintptr]nativeLayout
+	typeIDs  map[reflect.Type]uintptr
+	typeDefs []transferType
+	programs []*ixgoProgram
+	initial  map[objectRef]reflect.Value
 }
 
 type objectRef struct {
@@ -100,14 +105,17 @@ func (w *imageWriter) copy(src reflect.Value, dst uintptr, path string, depth in
 	}
 	w.keep = append(w.keep, src)
 	t := src.Type()
-	if _, ok := w.types[typeAddress(t)]; !ok {
-		return fmt.Errorf("%s: type %s was not included in the static transfer type set", path, t)
+	if _, err := w.typeID(t); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	ref := objectRef{typ: t, addr: src.UnsafeAddr()}
 	if old, ok := w.refs[ref]; ok && old != dst && t.Size() != 0 {
 		return fmt.Errorf("%s: overlapping/interior storage requires a common allocation image", path)
 	}
 	w.refs[ref] = dst
+	if t == reflect.TypeFor[reflect.Value]() {
+		return w.copyReflectValue(src.Interface().(reflect.Value), dst, path, depth)
+	}
 	switch t.Kind() {
 	case reflect.Struct:
 		for i := 0; i < t.NumField(); i++ {
@@ -124,6 +132,10 @@ func (w *imageWriter) copy(src reflect.Value, dst uintptr, path string, depth in
 		}
 	case reflect.Pointer:
 		if src.IsNil() {
+			return nil
+		}
+		if id := standardStream(src); id != 0 {
+			w.put(dst, standardStreamBit|id)
 			return nil
 		}
 		ref := objectRef{typ: t.Elem(), addr: src.Pointer()}
@@ -182,6 +194,15 @@ func (w *imageWriter) copy(src reflect.Value, dst uintptr, path string, depth in
 			return nil
 		}
 		v := src.Elem()
+		if typ, ok := v.Interface().(reflect.Type); ok {
+			id, err := w.typeID(typ)
+			if err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			w.put(dst, reflectTypeTag)
+			w.put(dst+8, id)
+			return nil
+		}
 		addr, err := w.alloc(v.Type().Size(), v.Type().Align())
 		if err != nil {
 			return err
@@ -189,7 +210,11 @@ func (w *imageWriter) copy(src reflect.Value, dst uintptr, path string, depth in
 		if err := w.copy(v, addr, path+".("+v.Type().String()+")", depth+1); err != nil {
 			return err
 		}
-		w.put(dst, typeAddress(v.Type()))
+		id, err := w.typeID(v.Type())
+		if err != nil {
+			return err
+		}
+		w.put(dst, id)
 		w.put(dst+8, addr)
 	case reflect.Map:
 		if src.IsNil() {
@@ -230,6 +255,17 @@ func (w *imageWriter) copy(src reflect.Value, dst uintptr, path string, depth in
 	case reflect.Func:
 		if src.IsNil() {
 			return nil
+		}
+		callback, err := w.metadata.ixgoCallback(src)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		if callback != nil {
+			addr, err := w.exportIxgo(src, callback, path, depth)
+			if err == nil {
+				w.put(dst, addr)
+			}
+			return err
 		}
 		layout, ok := w.native[src.Pointer()]
 		if !ok {
@@ -282,6 +318,9 @@ func (r *imageReader) copy(dst reflect.Value, src uintptr, path string, depth in
 		return fmt.Errorf("%s: unaligned %s address %#x", path, t, src)
 	}
 	r.refs[objectRef{typ: t, addr: src}] = dst.Addr()
+	if t == reflect.TypeFor[reflect.Value]() {
+		return r.restoreReflectValue(dst, src, path, depth)
+	}
 	switch t.Kind() {
 	case reflect.Struct:
 		for i := 0; i < t.NumField(); i++ {
@@ -298,6 +337,14 @@ func (r *imageReader) copy(dst reflect.Value, src uintptr, path string, depth in
 		}
 	case reflect.Pointer:
 		addr, _ := r.word(src)
+		if addr&standardStreamBit != 0 {
+			id := addr &^ standardStreamBit
+			if t != reflect.TypeFor[*os.File]() || id < 1 || id > 3 {
+				return fmt.Errorf("%s: invalid standard stream reference", path)
+			}
+			dst.Set(reflect.ValueOf([]*os.File{os.Stdin, os.Stdout, os.Stderr}[id-1]))
+			return nil
+		}
 		if addr == 0 {
 			dst.SetZero()
 			return nil
@@ -366,6 +413,14 @@ func (r *imageReader) copy(dst reflect.Value, src uintptr, path string, depth in
 	case reflect.Interface:
 		typeAddr, _ := r.word(src)
 		addr, _ := r.word(src + 8)
+		if typeAddr == reflectTypeTag {
+			typ := r.types[addr]
+			if typ == nil || !reflect.TypeOf(typ).Implements(t) {
+				return fmt.Errorf("%s: invalid reflected type", path)
+			}
+			dst.Set(reflect.ValueOf(typ))
+			return nil
+		}
 		if typeAddr == 0 {
 			if addr != 0 {
 				return fmt.Errorf("%s: nil interface with non-nil data", path)
@@ -433,7 +488,16 @@ func (r *imageReader) copy(dst reflect.Value, src uintptr, path string, depth in
 			dst.SetZero()
 			return nil
 		}
-		fn, err := r.restoreNative(addr, t, path, depth)
+		tag, err := r.word(addr)
+		if err != nil {
+			return err
+		}
+		var fn reflect.Value
+		if tag == ixgoImageTag {
+			fn, err = r.restoreIxgo(addr, t, path, depth)
+		} else {
+			fn, err = r.restoreNative(addr, t, path, depth)
+		}
 		if err != nil {
 			return err
 		}

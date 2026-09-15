@@ -48,6 +48,7 @@ type nativeMetadata struct {
 	typeStart uintptr
 	mainPC    uintptr
 	mainSize  uint64
+	ixgoPC    uintptr
 }
 
 func loadMetadata() (*nativeMetadata, error) {
@@ -84,6 +85,8 @@ func loadMetadata() (*nativeMetadata, error) {
 				m.mainPC = uintptr(s.Value)
 				m.mainSize = s.Size
 			}
+		case "github.com/goplus/ixgo.(*function).makeFunction.func1":
+			m.ixgoPC = uintptr(s.Value)
 		}
 	}
 	if m.typeStart == 0 || end <= m.typeStart {

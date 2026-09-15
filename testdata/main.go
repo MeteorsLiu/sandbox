@@ -174,6 +174,9 @@ func run() error {
 	if err := inspectTemporaryMemory(); err != nil {
 		return err
 	}
+	if err := inspectIxgo(); err != nil {
+		return err
+	}
 	return nil
 }
 

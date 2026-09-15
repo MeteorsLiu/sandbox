@@ -173,6 +173,9 @@ func (s *Sandbox) Run(fn func()) error {
 		return fmt.Errorf("sandbox guest did not publish a completed result")
 	}
 	out := newImage(output, m, functions)
+	if err := out.prepare(in); err != nil {
+		return fmt.Errorf("sandbox import metadata: %w", err)
+	}
 	if err := out.commit(w.anchors); err != nil {
 		return fmt.Errorf("sandbox import: %w", err)
 	}
