@@ -9,6 +9,7 @@ package main
 import "C"
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -26,7 +27,7 @@ import (
 var libraryMu sync.Mutex
 
 //export RunSandbox
-func RunSandbox(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
+func RunSandbox(config *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
 	libraryMu.Lock()
 	defer libraryMu.Unlock()
 	runtime.LockOSThread()
@@ -45,10 +46,18 @@ func RunSandbox(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t
 			report(fmt.Errorf("Sentry startup panicked: %v", v))
 		}
 	}()
+	var startup struct {
+		Guest  string  `json:"guest"`
+		Mounts []mount `json:"mounts"`
+	}
+	if err := json.Unmarshal([]byte(C.GoString(config)), &startup); err != nil {
+		report(fmt.Errorf("Sentry startup configuration: %w", err))
+		return code
+	}
 	installSyscallMemory()
 	var inspectionMu sync.Mutex
 	var inspectionErr error
-	err := runSentry("/", C.GoString(guest), int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, ac *arch.Context64) error {
+	err := runSentry(startup.Mounts, startup.Guest, int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, ac *arch.Context64) error {
 		if callback == nil {
 			return nil
 		}

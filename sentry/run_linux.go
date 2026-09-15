@@ -5,6 +5,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path"
+	"strings"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/hostarch"
@@ -15,20 +17,18 @@ import (
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
-func runSentry(root, executable string, imageFD int, mainPC, entryPC uintptr, inspect inspector) (err error) {
-	if executable == "" {
-		return errors.New("guest executable is required")
+func runSentry(mounts []mount, executable string, imageFD int, mainPC, entryPC uintptr, inspect inspector) (err error) {
+	if !path.IsAbs(executable) || strings.ContainsRune(executable, 0) {
+		return errors.New("guest executable must be an absolute path without NUL")
 	}
 	jump, err := entryJump(mainPC, entryPC)
 	if err != nil {
 		return err
 	}
-	ioFD, stopFilesystem, err := startFilesystem(root)
-	if err != nil {
+	defer closeMounts(mounts)
+	if err := prepareMounts(mounts); err != nil {
 		return err
 	}
-	defer stopFilesystem()
-	defer ioFD.Close()
 
 	k, err := newKernel(inspect)
 	if err != nil {
@@ -38,7 +38,7 @@ func runSentry(root, executable string, imageFD int, mainPC, entryPC uintptr, in
 	defer func() { err = errors.Join(err, releaseSyscallMemory(k)) }()
 	ctx := k.SupervisorContext()
 
-	mntns, err := mountFilesystem(k, ioFD.Release())
+	mntns, err := mountFilesystem(k, mounts)
 	if err != nil {
 		return err
 	}

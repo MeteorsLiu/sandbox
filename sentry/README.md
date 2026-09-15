@@ -1,6 +1,6 @@
 # Sentry Shared Library
 
-This module builds `sentrylib.so`, the gVisor Sentry backend for the `github.com/xgo-dev/sandbox` library. It owns Sentry startup, the Systrap platform, the read-only DirectFS root and the context-switch inspection hook. The caller owns closure/value transfer and the guest entry.
+This module builds `sentrylib.so`, the gVisor Sentry backend for the `github.com/xgo-dev/sandbox` library. It owns Sentry startup, the Systrap platform, configured filesystems and the context-switch inspection hook. The caller owns closure/value transfer and the guest entry.
 
 The modules communicate through the C ABI in [sandbox.h](sandbox.h). There is no Go dependency in either direction. The host keeps its own copy of the ABI declarations in `bridge.h`; downloading the host Go module does not require these Sentry sources.
 
@@ -28,11 +28,11 @@ The workflow can also be dispatched with an existing Sentry tag to retry a faile
 ## C Entry
 
 ```c
-int RunSandbox(char *guest, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
+int RunSandbox(char *config, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
                  uintptr_t owner, inspect_fn inspect, char *message, size_t capacity);
 ```
 
-- `guest` is the guest executable's absolute path. Sentry starts it with that path as `argv[0]` and no extra arguments.
+- `config` is a NUL-terminated JSON object containing `guest` (the executable's absolute guest path) and `mounts`. Sentry starts the executable with that path as `argv[0]` and no extra arguments. Mount entries contain `type`, optional `source`, `target` and optional `options` (an array of strings).
 - `image_fd` is a caller-owned descriptor imported as guest fd 3. The library does not interpret its contents. Guest fd 0, 1 and 2 are imported from host stdin, stdout and stderr.
 - `main_pc` is the guest virtual address to redirect; the caller supplies its `main.main` address. The caller must verify that the symbol contains at least 5 bytes on AMD64 or 4 bytes on ARM64. Before starting guest tasks, the library writes a relative branch into this private executable mapping using Sentry's existing memory manager.
 - `entry_pc` is the guest virtual address of the caller's private, non-capturing Go `func()` startup entry. It runs after Go package initialization and returns after exporting closure results. The caller owns ELF symbol resolution, guest code and value reconstruction. The library checks branch range and alignment; it does not interpret the closure image. Unsupported branch layouts fail before creating the guest.
@@ -42,7 +42,25 @@ int RunSandbox(char *guest, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
 
 All supplied strings, buffers and callback state must remain valid until `RunSandbox` returns. Each event, its name and its context handle are borrowed only for the duration of `inspect`. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
 
-The C entry name stays `RunSandbox`; releases use Go module version tags. The `sentry/v0.2.0` ABI adds guest entry redirection and syscall memory mapping and is incompatible with `sentry/v0.1.0`. Build the host and shared library from the same source revision. Go module version selection does not validate a library loaded with `dlopen`, and symbol lookup cannot detect an incompatible signature with the same name.
+The C entry name stays `RunSandbox`; releases use Go module version tags. In `sentry/v0.4.0`, the first string changes from an executable path to startup JSON; the C parameter types and syscall callback layout remain unchanged. The host and shared library must both use this contract. An older path is rejected as invalid JSON; an older backend cannot interpret the new configuration as an executable path. The earlier `sentry/v0.1.0` library also has an incompatible C signature and must not be loaded. Go module version selection does not validate a library loaded with `dlopen`.
+
+Example startup configuration:
+
+```json
+{
+  "guest": "/opt/llar/llar",
+  "mounts": [
+    {"type": "bind", "source": "/", "target": "/", "options": ["ro"]},
+    {"type": "bind", "source": "/var/tmp/build", "target": "/work", "options": ["rw"]},
+    {"type": "tmpfs", "target": "/tmp", "options": ["mode=1777", "size=256m"]},
+    {"type": "proc", "target": "/proc"}
+  ]
+}
+```
+
+The backend requires an explicit list beginning with a `bind` or `tmpfs` root at `/`. The Go host supplies the default read-only `/` and guest `/proc` when its `Mounts` is empty. Bind sources must be absolute host directory paths. Targets are absolute guest paths; mounts are applied in order, and duplicate targets are rejected. Parent mounts and overlay layers must precede their users. Missing directory mountpoints use Sentry's synthetic-mountpoint support and require a writable parent mount; targets under a read-only parent must already exist.
+
+Registered types are `bind` (translated to gofer with DirectFS), `tmpfs`, `proc` and `overlay`. Common options are `ro`/`rw`, `noexec`/`exec`, `nosuid`/`suid` and `noatime`/`atime`, with the last option in a pair taking precedence. Tmpfs and overlay filesystem options are passed to Sentry as mount data; unsupported options fail. For overlay, `lowerdir` and `upperdir` refer to paths in the guest namespace, not host paths. An upper tmpfs makes changes temporary; use writable binds for persistent outputs. Mount namespaces, tmpfs contents and bind connections are released after the call, including partial setup failures.
 
 The event's `mmap(context, address, size, memory)` callback allocates anonymous temporary guest pages using `MMap` and pins them. Address `0` requests `size` zeroed bytes without a source; a nonzero address initializes the pages using `CopyIn`. Sentry chooses a vacant guest address. The returned `syscall_memory` contains a host `data` pointer directly mapping those pages, their guest `address`, and the initialized `length`. The host and guest addresses need not match. Editing `data` immediately changes the temporary pages without changing the original guest bytes. There is no caller-owned staging buffer or write/commit callback; initialization from a source copies bytes and is not COW. Address-zero allocation requires `sentry/v0.3.0` or later; it is not supported by `sentry/v0.2.0`.
 
@@ -70,7 +88,7 @@ The hook is implemented in [platform_linux.go](platform_linux.go). It does not m
 
 ## Runtime Conditions
 
-Start the host with `GLIBC_TUNABLES=glibc.pthread.rseq=0`. Systrap's ptrace/seccomp initialization must be permitted by the surrounding environment. The current guest uses UID/GID 1000, working directory `/`, a read-only host root and an in-process LISAFS service for DirectFS. These are the existing backend settings, not a configurable filesystem or environment policy.
+Start the host with `GLIBC_TUNABLES=glibc.pthread.rseq=0`. Systrap's ptrace/seccomp initialization must be permitted by the surrounding environment. The guest uses UID/GID 1000 and working directory `/`; environment configuration is not exposed. Bind mounts use in-process LISAFS services for DirectFS. The executable, loader and shared libraries must be visible in the configured namespace. Filesystem permissions still apply in addition to mount flags.
 
 Native execution has been verified on Linux ARM64 with 4 KiB pages, including LLAR formula execution and syscall rewriting through the host callback. AMD64 builds are verified; native AMD64 Sentry execution and other page sizes still need validation. Both Go runtimes share the host OS address space and signal dispositions. Dependency separation through c-shared is not itself a memory protection boundary inside the host.
 

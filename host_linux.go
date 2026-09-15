@@ -11,6 +11,7 @@ import "C"
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -147,9 +148,23 @@ func (s *Sandbox) Run(fn func()) error {
 	if err != nil {
 		return err
 	}
-	cLibrary, cExecutable := C.CString(library), C.CString(executable)
+	mounts := s.Mounts
+	if len(mounts) == 0 {
+		mounts = []Mount{
+			{Type: "bind", Source: "/", Target: "/", Options: []string{"ro"}},
+			{Type: "proc", Target: "/proc"},
+		}
+	}
+	config, err := json.Marshal(struct {
+		Guest  string  `json:"guest"`
+		Mounts []Mount `json:"mounts"`
+	}{executable, mounts})
+	if err != nil {
+		return fmt.Errorf("sandbox configuration: %w", err)
+	}
+	cLibrary, cConfig := C.CString(library), C.CString(string(config))
 	defer C.free(unsafe.Pointer(cLibrary))
-	defer C.free(unsafe.Pointer(cExecutable))
+	defer C.free(unsafe.Pointer(cConfig))
 	i := &inspection{fn: s.Inspect}
 	var handle cgo.Handle
 	if s.Inspect != nil {
@@ -157,7 +172,7 @@ func (s *Sandbox) Run(fn func()) error {
 		defer handle.Delete()
 	}
 	var message [4096]C.char
-	code := C.sandbox_load(cLibrary, cExecutable, C.int(fd), C.uintptr_t(m.mainPC), C.uintptr_t(entryPC), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
+	code := C.sandbox_load(cLibrary, cConfig, C.int(fd), C.uintptr_t(m.mainPC), C.uintptr_t(entryPC), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
 	if code != 0 {
 		return fmt.Errorf("sandbox Sentry: %s", C.GoString(&message[0]))
 	}

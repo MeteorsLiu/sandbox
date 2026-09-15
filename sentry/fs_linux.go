@@ -17,21 +17,26 @@
 package main
 
 // Adapted from runsc/boot/vfs.go, loader.go and loader_test.go at gVisor
-// Go-export d1e35511e5a41ee5c2afc522d2f9b0c27cf8d382. This backend retains a
-// read-only DirectFS root, guest procfs, and standard descriptors.
+// Go-export d1e35511e5a41ee5c2afc522d2f9b0c27cf8d382.
 
 import (
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/lisafs"
+	"gvisor.dev/gvisor/pkg/sentry/devices/memdev"
 	"gvisor.dev/gvisor/pkg/sentry/fdimport"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/overlay"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/proc"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -42,7 +47,115 @@ import (
 var procFDOnce sync.Once
 var procFDErr error
 
-func startFilesystem(root string) (*fd.FD, func(), error) {
+type mount struct {
+	Type    string   `json:"type"`
+	Source  string   `json:"source,omitempty"`
+	Target  string   `json:"target"`
+	Options []string `json:"options,omitempty"`
+
+	opts vfs.MountOptions
+	ioFD *fd.FD
+	stop func()
+}
+
+// Bind connections outlive the kernel and its mount namespace. Release them
+// last, including connections prepared before a later mount fails.
+func closeMounts(mounts []mount) {
+	for i := len(mounts) - 1; i >= 0; i-- {
+		m := &mounts[i]
+		if m.ioFD != nil {
+			m.ioFD.Close()
+		}
+		if m.stop != nil {
+			m.stop()
+		}
+	}
+}
+
+func prepareMounts(mounts []mount) error {
+	if len(mounts) == 0 || mounts[0].Target != "/" || (mounts[0].Type != "bind" && mounts[0].Type != tmpfs.Name) {
+		return fmt.Errorf("first mount must be bind or tmpfs at /")
+	}
+	targets := make(map[string]bool)
+	for i := range mounts {
+		m := &mounts[i]
+		if !path.IsAbs(m.Target) || strings.ContainsRune(m.Target, 0) {
+			return fmt.Errorf("mount target %q must be an absolute path without NUL", m.Target)
+		}
+		m.Target = path.Clean(m.Target)
+		if targets[m.Target] {
+			return fmt.Errorf("duplicate mount target %q", m.Target)
+		}
+		targets[m.Target] = true
+		switch m.Type {
+		case "bind":
+			if !path.IsAbs(m.Source) || strings.ContainsRune(m.Source, 0) {
+				return fmt.Errorf("bind source %q must be an absolute host path without NUL", m.Source)
+			}
+			// LISAFS opens the final component with O_NOFOLLOW. Resolve host
+			// aliases such as /lib -> /usr/lib before donating the root FD.
+			source, err := filepath.EvalSymlinks(m.Source)
+			if err != nil {
+				return fmt.Errorf("bind source: %w", err)
+			}
+			m.Source = source
+			info, err := os.Stat(m.Source)
+			if err != nil {
+				return fmt.Errorf("bind source: %w", err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("bind source %q must be a directory", m.Source)
+			}
+		case tmpfs.Name, proc.Name, overlay.Name:
+		default:
+			return fmt.Errorf("unsupported filesystem type %q", m.Type)
+		}
+		m.opts.GetFilesystemOptions.InternalMount = true
+		var data []string
+		for _, option := range m.Options {
+			if option == "" || strings.ContainsAny(option, ",\x00") {
+				return fmt.Errorf("mount %q: invalid option %q", m.Target, option)
+			}
+			switch option {
+			case "ro":
+				m.opts.ReadOnly = true
+			case "rw":
+				m.opts.ReadOnly = false
+			case "noexec":
+				m.opts.Flags.NoExec = true
+			case "exec":
+				m.opts.Flags.NoExec = false
+			case "nosuid":
+				m.opts.Flags.NoSUID = true
+			case "suid":
+				m.opts.Flags.NoSUID = false
+			case "noatime":
+				m.opts.Flags.NoATime = true
+			case "atime":
+				m.opts.Flags.NoATime = false
+			default:
+				if m.Type != tmpfs.Name && m.Type != overlay.Name {
+					return fmt.Errorf("mount %q: unsupported option %q", m.Target, option)
+				}
+				data = append(data, option)
+			}
+		}
+		m.opts.GetFilesystemOptions.Data = strings.Join(data, ",")
+	}
+	for i := range mounts {
+		m := &mounts[i]
+		if m.Type == "bind" {
+			var err error
+			m.ioFD, m.stop, err = startFilesystem(m.Source, m.opts.ReadOnly)
+			if err != nil {
+				return fmt.Errorf("mount %q: %w", m.Target, err)
+			}
+		}
+	}
+	return nil
+}
+
+func startFilesystem(root string, readOnly bool) (*fd.FD, func(), error) {
 	procFDOnce.Do(func() { procFDErr = fsgofer.OpenProcSelfFD("/proc/self/fd") })
 	if procFDErr != nil {
 		return nil, nil, procFDErr
@@ -60,7 +173,7 @@ func startFilesystem(root string) (*fd.FD, func(), error) {
 	}
 	server := lisafs.NewServer()
 	impl := fsgofer.NewConnectionImpl(&fsgofer.Config{DonateMountPointFD: true})
-	conn, err := server.CreateConnection(socket, root, fsgofer.ConnectionOpts(true), impl)
+	conn, err := server.CreateConnection(socket, root, fsgofer.ConnectionOpts(readOnly), impl)
 	if err != nil {
 		client.Close()
 		socket.Close()
@@ -75,31 +188,54 @@ func startFilesystem(root string) (*fd.FD, func(), error) {
 	}, nil
 }
 
-// mountFilesystem takes ownership of ioFD, which is used by the gofer client.
-func mountFilesystem(k *kernel.Kernel, ioFD int) (*vfs.MountNamespace, error) {
+func mountFilesystem(k *kernel.Kernel, mounts []mount) (_ *vfs.MountNamespace, err error) {
 	ctx := k.SupervisorContext()
 	creds := auth.NewRootCredentials(k.RootUserNamespace())
 	vfsObj := k.VFS()
+	if err := memdev.Register(vfsObj); err != nil {
+		return nil, fmt.Errorf("registering memory devices: %w", err)
+	}
 	vfsObj.MustRegisterFilesystemType(gofer.Name, &gofer.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
 	vfsObj.MustRegisterFilesystemType(proc.Name, &proc.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
-	mntns, err := vfsObj.NewMountNamespace(ctx, creds, "root", gofer.Name, &vfs.MountOptions{
-		ReadOnly: true,
-		GetFilesystemOptions: vfs.GetFilesystemOptions{
-			InternalMount: true,
-			Data:          fmt.Sprintf("trans=fd,rfdno=%d,wfdno=%d,directfs,disable_fifo_open", ioFD, ioFD),
-		},
-	}, k)
-	if err != nil {
-		return nil, fmt.Errorf("mounting root: %w", err)
-	}
-	root := mntns.Root(ctx)
-	defer root.DecRef(ctx)
-	_, err = vfsObj.MountAt(ctx, creds, "proc", &vfs.PathOperation{
-		Root: root, Start: root, Path: fspath.Parse("proc"), FollowFinalSymlink: true,
-	}, proc.Name, &vfs.MountOptions{GetFilesystemOptions: vfs.GetFilesystemOptions{InternalMount: true}})
-	if err != nil {
-		mntns.DecRef(ctx)
-		return nil, fmt.Errorf("mounting proc: %w", err)
+	vfsObj.MustRegisterFilesystemType(tmpfs.Name, &tmpfs.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
+	vfsObj.MustRegisterFilesystemType(overlay.Name, &overlay.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
+	var mntns *vfs.MountNamespace
+	var root vfs.VirtualDentry
+	defer func() {
+		if root.Ok() {
+			root.DecRef(ctx)
+		}
+		if err != nil && mntns != nil {
+			mntns.DecRef(ctx)
+		}
+	}()
+	for i := range mounts {
+		m := &mounts[i]
+		if i != 0 {
+			if err := vfsObj.MakeSyntheticMountpoint(ctx, m.Target, root, creds); err != nil {
+				return nil, err
+			}
+		}
+		fsType := m.Type
+		if fsType == "bind" {
+			fsType = gofer.Name
+			ioFD := m.ioFD.Release()
+			m.opts.GetFilesystemOptions.Data = fmt.Sprintf("trans=fd,rfdno=%d,wfdno=%d,directfs,disable_fifo_open", ioFD, ioFD)
+		}
+		if i == 0 {
+			mntns, err = vfsObj.NewMountNamespace(ctx, creds, m.Source, fsType, &m.opts, k)
+			if err != nil {
+				return nil, fmt.Errorf("mounting root: %w", err)
+			}
+			root = mntns.Root(ctx)
+			ctx = vfs.WithRoot(vfs.WithMountNamespace(ctx, mntns), root)
+			continue
+		}
+		if _, err := vfsObj.MountAt(ctx, creds, m.Source, &vfs.PathOperation{
+			Root: root, Start: root, Path: fspath.Parse(m.Target), FollowFinalSymlink: true,
+		}, fsType, &m.opts); err != nil {
+			return nil, fmt.Errorf("mounting %q at %q: %w", fsType, m.Target, err)
+		}
 	}
 	return mntns, nil
 }

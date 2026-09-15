@@ -11,14 +11,14 @@ extern void sandboxInspect(uintptr_t, struct syscall_event *);
 static run_sentry_fn entry;
 static char *loaded_path;
 
-int sandbox_load(char *library, char *guest, int image_fd, uintptr_t main_pc,
+int sandbox_load(char *library, char *config, int image_fd, uintptr_t main_pc,
                  uintptr_t entry_pc, uintptr_t owner, char *error, size_t capacity) {
     if (entry != NULL) {
         if (strcmp(library, loaded_path) != 0) {
             snprintf(error, capacity, "Sentry library is already loaded from %s", loaded_path);
             return 1;
         }
-        return entry(guest, image_fd, main_pc, entry_pc, owner, owner ? sandboxInspect : NULL, error, capacity);
+        return entry(config, image_fd, main_pc, entry_pc, owner, owner ? sandboxInspect : NULL, error, capacity);
     }
     void *handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
     if (handle == NULL) {
@@ -39,5 +39,5 @@ int sandbox_load(char *library, char *guest, int image_fd, uintptr_t main_pc,
         return 1;
     }
     entry = run;
-    return entry(guest, image_fd, main_pc, entry_pc, owner, owner ? sandboxInspect : NULL, error, capacity);
+    return entry(config, image_fd, main_pc, entry_pc, owner, owner ? sandboxInspect : NULL, error, capacity);
 }

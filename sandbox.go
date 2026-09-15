@@ -11,10 +11,22 @@ type Syscall struct {
 	access *syscallAccess
 }
 
-// Sandbox selects the shared library and the synchronous host inspector.
+// Mount describes a filesystem in the guest namespace. Source is a host
+// directory for bind mounts; overlay paths in Options refer to guest paths.
+type Mount struct {
+	Type    string   `json:"type"`
+	Source  string   `json:"source,omitempty"`
+	Target  string   `json:"target"`
+	Options []string `json:"options,omitempty"`
+}
+
+// Sandbox selects the shared library, guest mounts and synchronous inspector.
 // Library defaults to sentrylib.so beside the calling executable.
 type Sandbox struct {
 	Library string
+	// An empty Mounts uses a read-only host root and guest procfs. Otherwise
+	// the list replaces all defaults, starting with a bind or tmpfs at /.
+	Mounts  []Mount
 	Inspect func(*Syscall)
 }
 

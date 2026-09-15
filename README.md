@@ -26,7 +26,7 @@ github.com/xgo-dev/sandbox/testdata    integration test executable -> smoke
 
 Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through `dlopen` and does not import the Sentry module or gVisor. Each module carries its own C ABI declarations so either module can be fetched independently. The ABI carries guest startup addresses, syscall registers and synchronous inspection and memory mapping callbacks.
 
-The C entry is `RunSandbox`. This host API requires the Sentry ABI introduced in `sentry/v0.2.0`; the `sentry/v0.1.0` library is incompatible. Build the host and Sentry from the same source revision. Go module version selection does not check the ABI of a library loaded through `dlopen`.
+The C entry is `RunSandbox`. This host API requires `sentry/v0.4.0`: its first string contains startup JSON with the guest executable and filesystem configuration. Earlier libraries expect an executable path in that position and are incompatible. Build the host and Sentry from the same source revision. Go module version selection does not check the ABI of a library loaded through `dlopen`.
 
 The sandbox module depends on ixgo for rebuilding interpreted closures. It does not depend on LLAR or gVisor. LLAR can continue using its own formula loader and pass an already loaded callback through the ordinary `Run` entry.
 
@@ -56,6 +56,48 @@ Standard `os.Stdin`, `os.Stdout` and `os.Stderr` references are rebound to the c
 The interpreter, its captures and its global variables must remain exclusively owned until `Run` returns. Native package registrations must also be present after guest package initialization. Per-context `RegisterExternal` native functions and variable bindings are transferred; bindings that themselves require an interpreted type or ixgo callback before that interpreter exists are rejected. Custom execution/debug hooks, REPL contexts, inaccessible source and ambiguous type/function identities are rejected. A custom importer is not reconstructed; interpreted source dependencies are included in the image.
 
 This path uses ixgo v1.1.6 private layouts and entry points together with the pinned Go toolchain. Methods, local generic types and new closures from an existing interpreted program are covered by transfer tests; this is not a claim that every generic or reflection operation is supported. Restricted `reflect.Value` access, native generic dictionaries, and incomplete native closure DWARF remain unsupported. A guest cannot introduce a new interpreter/program into the host on return.
+
+## Filesystems
+
+`Sandbox.Mounts` configures the guest namespace without importing gVisor. For a build whose source and installation directories are under `/work`:
+
+```go
+s := sandbox.Sandbox{
+    Mounts: []sandbox.Mount{
+        {Type: "bind", Source: "/", Target: "/", Options: []string{"ro"}},
+        {Type: "bind", Source: workDir, Target: "/work", Options: []string{"rw"}},
+        {Type: "tmpfs", Target: "/tmp", Options: []string{"mode=1777", "size=256m"}},
+        {Type: "proc", Target: "/proc"},
+    },
+}
+err := s.Run(func() { f.OnBuild(ctx) })
+```
+
+`Source` is an absolute host directory for `bind`; host symlinks such as `/lib` are resolved before mounting. `Target` is an absolute guest path. With the read-only root in this example, `/work` must already exist. Captured paths are ordinary strings: set the formula's source and output paths to their guest locations, such as `/work/source` and `/work/install`. The host executable must also be visible at its original absolute path inside the guest, together with its loader and shared libraries.
+
+| Type | Source and lifetime |
+| --- | --- |
+| `bind` | Host directory, served through DirectFS. Writes persist in that host directory. Host permissions still apply. |
+| `tmpfs` | New Sentry filesystem for each call. Supports options such as `size`, `mode`, `uid` and `gid`; contents disappear when the call ends. |
+| `proc` | Process information from the guest's Sentry kernel. |
+| `overlay` | Combines already visible guest paths using `lowerdir` and optional `upperdir`. Writes go to the upper layer, whose filesystem determines persistence. |
+
+An empty `Mounts` retains the default read-only host `/` and guest `/proc`. A nonempty list replaces all defaults. Its first entry must mount `bind` or `tmpfs` at `/`; subsequent mounts are applied in order, so parents and overlay layers must precede their users. Duplicate targets and unsupported types return an error. Missing directory mountpoints are prepared through Sentry's synthetic-mountpoint support, which still requires a writable parent mount. For a read-only parent, prepare the target directory beforehand or place new mountpoints under a writable tmpfs. Bind sources currently must be directories.
+
+Common options are `ro`/`rw`, `noexec`/`exec`, `nosuid`/`suid` and `noatime`/`atime`; the last option in each pair wins. With no `ro`, a mount is writable subject to the underlying filesystem and permissions. Tmpfs and overlay options are passed to their Sentry implementations. Bind transport parameters remain internal. Each `Options` element is one option, without a comma or NUL character. Guest UID/GID remain 1000, the working directory remains `/`, and environment configuration is not yet exposed.
+
+For an overlay over read-only source, prepare a lower bind mount and an upper tmpfs before attaching the overlay:
+
+```go
+// Append after the root and /tmp tmpfs mounts above.
+s.Mounts = append(s.Mounts,
+    sandbox.Mount{Type: "bind", Source: sourceDir, Target: "/tmp/lower", Options: []string{"ro"}},
+    sandbox.Mount{Type: "tmpfs", Target: "/tmp/upper", Options: []string{"mode=1777", "size=256m"}},
+    sandbox.Mount{Type: "overlay", Target: "/tmp/merged", Options: []string{"lowerdir=/tmp/lower", "upperdir=/tmp/upper"}},
+)
+```
+
+Here `/tmp/merged` is the guest's source directory, and its changes disappear with the upper tmpfs. Mount installation output separately through a writable bind to retain build artifacts. Filesystem setup and cleanup belong to each `Run`; syscall inspection continues to occur at the same context-switch boundary.
 
 ## Host Inspection
 
@@ -301,7 +343,7 @@ This is an executable module with a general `func()` entry, not yet a production
 - Native functions already reachable from the input are authorized for host result restoration. Returning a native function with a previously unseen code entry is rejected. A returned ixgo closure must belong to an original transferred program and its known function set.
 - Input objects stay alive through the call. Imported objects stay alive in the guest even after the closure drops its reference, so their mutations can still reach host aliases. Result decoding finishes before writeback starts; a guest panic, exit failure or malformed result prevents that writeback. External syscall side effects are not rolled back.
 - The shared library retains a Systrap platform and its process-lifetime workers. Each call creates a fresh Sentry kernel/guest. The two Go runtimes still share OS signal dispositions and the host process address space; c-shared isolates dependencies and runtime heaps, not hostile native code within the host.
-- Filesystem/environment policies, cancellation, comprehensive startup-failure cleanup, hostile-image fuzzing and a broader platform/toolchain matrix remain necessary before production use.
+- Filesystem policies are supplied through `Mounts`. Environment configuration, cancellation, comprehensive startup-failure cleanup, hostile-image fuzzing and a broader platform/toolchain matrix remain necessary before production use.
 
 ## Verification
 
@@ -312,3 +354,5 @@ The smoke test covers automatic guest entry after package initialization without
 The interpreted integration in [testdata/ixgo.go](testdata/ixgo.go) creates the method callback on the host, then verifies class state, reflection, package globals, a real file-read syscall, writeback and continued host execution. Transfer tests also cover multiple interpreters, interpreted source dependencies, local generic types, external native closure aliases, returned ixgo closures and malformed output without partial host mutation.
 
 The separate LLAR check loads a classfile on the host before `Run`, calls its existing `OnBuild(ctx)` in Sentry with both `Project.ReadFile` and `os.ReadFile`, writes back a custom class counter and the native output-directory callback's captures, then calls the same formula again on the host. The real Sentry path is verified on ARM64. AMD64 value-transfer tests run under emulation; native AMD64 Sentry execution remains unverified.
+
+The unmodified LLAR `formula/demo/zlib/zlib_llar.gox` was also run on Linux ARM64 against zlib 1.3.2 sources. Configure, compilation and installation produced `libz.a` and headers, and `-lz` metadata returned to the host. This check used writable build/output mounts, a tmpfs at `/tmp`, matching host/guest UID 1000, and an explicit `PATH=/usr/bin:/bin` set inside the guest closure before `OnBuild`. Filesystem regression tests and the full platform matrix remain follow-up work.
