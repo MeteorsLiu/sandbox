@@ -7,6 +7,8 @@ package sandbox
 type Syscall struct {
 	Number uint64
 	Args   [6]uint64
+	Name   string
+	access *syscallAccess
 }
 
 // Sandbox selects the shared library and the synchronous host inspector.

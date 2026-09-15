@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -167,5 +168,114 @@ func run() error {
 	check(stdinBefore.Ino == stdinAfter.Ino && stdinBefore.Dev == stdinAfter.Dev && text != "", "stdin changed/read missing")
 	check(calls.Load() > 0, "no inspector callbacks")
 	fmt.Printf("PASS read syscall, stdin preserved, inspector callbacks=%d\n", calls.Load())
+	if err := inspectMemory(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func inspectMemory() error {
+	dir, err := os.MkdirTemp("", "sandbox-inspection-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0755); err != nil {
+		return err
+	}
+	requested := filepath.Join(dir, "missing")
+	actual := filepath.Join(dir, "longer-replacement-file")
+	if err := os.WriteFile(actual, []byte("redirected file content"), 0644); err != nil {
+		return err
+	}
+	var retained *sandbox.Syscall
+	var snapshot *sandbox.DecodedSyscall
+	var inspectionErr error
+	pathChanged, bufferChanged := false, false
+	s := sandbox.Sandbox{Inspect: func(call *sandbox.Syscall) {
+		if inspectionErr != nil {
+			return
+		}
+		switch call.Name {
+		case "openat":
+			decoded, err := call.Decode(8192)
+			if err != nil {
+				inspectionErr = err
+				return
+			}
+			if decoded.Args[1].Value != requested {
+				return
+			}
+			buf := make([]byte, len(requested)+1)
+			n, err := call.ReadMemory(call.Args[1], buf)
+			if err != nil || n != len(buf) || string(buf) != requested+"\x00" {
+				inspectionErr = fmt.Errorf("guest memory read: %d %v", n, err)
+				return
+			}
+			if _, err := call.ReadMemory(1, buf); err == nil {
+				inspectionErr = fmt.Errorf("unmapped guest memory read succeeded")
+				return
+			}
+			decoded.Args[1].Value = actual
+			inspectionErr = call.Rewrite(decoded)
+			pathChanged = inspectionErr == nil
+			retained, snapshot = call, decoded
+		case "write":
+			if call.Args[2] != uint64(len("before-interceptor")) {
+				return
+			}
+			decoded, err := call.Decode(1024)
+			if err != nil {
+				inspectionErr = err
+				return
+			}
+			decoded.Args[1].Value = map[string]any{"bytes": []byte("after-interceptor-longer")}
+			inspectionErr = call.Rewrite(decoded)
+			bufferChanged = inspectionErr == nil
+		}
+	}}
+	var content, received string
+	var written int
+	err = s.Run(func() {
+		data, err := os.ReadFile(requested)
+		if err != nil {
+			panic(err)
+		}
+		content = string(data)
+		var pipe [2]int
+		if err := unix.Pipe(pipe[:]); err != nil {
+			panic(err)
+		}
+		defer unix.Close(pipe[0])
+		defer unix.Close(pipe[1])
+		written, err = unix.Write(pipe[1], []byte("before-interceptor"))
+		if err != nil {
+			panic(err)
+		}
+		var buf [128]byte
+		n, err := unix.Read(pipe[0], buf[:])
+		if err != nil {
+			panic(err)
+		}
+		received = string(buf[:n])
+	})
+	if inspectionErr != nil {
+		return fmt.Errorf("structured inspector: %w", inspectionErr)
+	}
+	if err != nil {
+		return fmt.Errorf("guest memory inspection: %w", err)
+	}
+	check(pathChanged && content == "redirected file content", "openat pathname rewrite")
+	check(bufferChanged && received == "after-interceptor-longer" && written == len(received), "write buffer and count rewrite")
+	if _, err := retained.ReadMemory(1, make([]byte, 1)); err == nil {
+		return fmt.Errorf("retained ReadMemory was accepted")
+	}
+	if _, err := retained.Decode(1024); err == nil {
+		return fmt.Errorf("retained Decode was accepted")
+	}
+	if err := retained.Rewrite(snapshot); err == nil {
+		return fmt.Errorf("retained Rewrite was accepted")
+	}
+	fmt.Println("PASS lazy structured decode, guest memory reads, openat path and write buffer/count rewrites, callback lifetime")
 	return nil
 }

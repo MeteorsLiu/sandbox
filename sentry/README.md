@@ -28,7 +28,7 @@ The workflow can also be dispatched with an existing Sentry tag to retry a faile
 ## C Entry
 
 ```c
-int RunSandboxAt(char *guest, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
+int RunSandboxAtV2(char *guest, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
                  uintptr_t owner, inspect_fn inspect, char *message, size_t capacity);
 ```
 
@@ -37,12 +37,16 @@ int RunSandboxAt(char *guest, int image_fd, uintptr_t main_pc, uintptr_t entry_p
 - `main_pc` is the guest virtual address to redirect; the caller supplies its `main.main` address. The caller must verify that the symbol contains at least 5 bytes on AMD64 or 4 bytes on ARM64. Before starting guest tasks, the library writes a relative branch into this private executable mapping using Sentry's existing memory manager.
 - `entry_pc` is the guest virtual address of the caller's private, non-capturing Go `func()` startup entry. It runs after Go package initialization and returns after exporting closure results. The caller owns ELF symbol resolution, guest code and value reconstruction. The library checks branch range and alignment; it does not interpret the closure image. Unsupported branch layouts fail before creating the guest.
 - `owner` is an opaque integer passed unchanged to `inspect`. A Go caller can use a `cgo.Handle` owned by its own runtime.
-- `inspect` is a required synchronous callback. It receives a borrowed `syscall_event` containing the syscall number and six arguments, and may change those integers before returning. Guest pointer arguments must not be dereferenced in the host.
+- `inspect` is an optional synchronous callback. It receives a borrowed `syscall_event` containing the syscall number, name, six arguments and memory/codec callbacks. It may change the registers directly or call `decode` and `rewrite` for structured input edits. A null callback skips inspection setup. Guest pointer arguments must not be dereferenced in the host.
 - `message` is a writable error buffer of `capacity` bytes. A nonzero result indicates an error; zero means that the guest exited successfully.
 
-All supplied strings, buffers and callback state must remain valid until `RunSandboxAt` returns. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
+All supplied strings, buffers and callback state must remain valid until `RunSandboxAtV2` returns. Each event, its name and its context handle are borrowed only for the duration of `inspect`. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
 
-`RunSandboxAt` replaces the `RunSandbox` symbol from `sentry/v0.1.0`. This revision is unreleased and requires a matching host build. Distinct symbols make an incompatible host/library combination fail during symbol lookup rather than calling an incompatible C signature.
+`RunSandboxAtV2` replaces the older `RunSandbox` and `RunSandboxAt` symbols. This revision is unreleased and requires a matching host build. Distinct symbols make an incompatible host/library combination fail during symbol lookup rather than calling an incompatible C signature.
+
+The event's `read` callback copies guest bytes into a caller-owned buffer and reports both a byte count and an optional error. `decode` returns a JSON argument snapshot under a caller-supplied guest-read budget. `rewrite` accepts the edited JSON snapshot, encodes changed input values in guest memory and updates the event's registers. Returned JSON and error strings are allocated with the C allocator; the caller frees them with `free`. No callback retains a caller buffer. The host implementation serializes these operations and invalidates them before returning from `inspect`.
+
+[codec_linux.go](codec_linux.go) owns the structured codecs. [inspect_linux.go](inspect_linux.go) performs memory operations through Sentry's memory manager and exports the synchronous C callbacks. Generated `strace_amd64.go` and `strace_arm64.go` contain the pinned gVisor strace argument classifications; regenerate them with `go generate .` from this module. The generator reads the dependency's Go AST without modifying it. Display classifications do not always specify a writable layout, so output, in/out and unsupported overloaded arguments remain raw. See the root README for the supported representations and lifetime limits.
 
 ```text
 guest syscall

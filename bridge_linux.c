@@ -18,7 +18,7 @@ int sandbox_load(char *library, char *guest, int image_fd, uintptr_t main_pc,
             snprintf(error, capacity, "Sentry library is already loaded from %s", loaded_path);
             return 1;
         }
-        return entry(guest, image_fd, main_pc, entry_pc, owner, sandboxInspect, error, capacity);
+        return entry(guest, image_fd, main_pc, entry_pc, owner, owner ? sandboxInspect : NULL, error, capacity);
     }
     void *handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
     if (handle == NULL) {
@@ -26,10 +26,10 @@ int sandbox_load(char *library, char *guest, int image_fd, uintptr_t main_pc,
         return 1;
     }
     dlerror();
-    run_sentry_fn run = (run_sentry_fn)dlsym(handle, "RunSandboxAt");
+    run_sentry_fn run = (run_sentry_fn)dlsym(handle, "RunSandboxAtV2");
     const char *message = dlerror();
     if (message != NULL) {
-        snprintf(error, capacity, "dlsym RunSandboxAt: %s; rebuild the Sentry library for automatic guest entry", message);
+        snprintf(error, capacity, "dlsym RunSandboxAtV2: %s; rebuild the Sentry library for syscall inspection ABI v2", message);
         return 1;
     }
     // Go runtimes leave background threads alive. Never dlclose their code.
@@ -39,5 +39,5 @@ int sandbox_load(char *library, char *guest, int image_fd, uintptr_t main_pc,
         return 1;
     }
     entry = run;
-    return entry(guest, image_fd, main_pc, entry_pc, owner, sandboxInspect, error, capacity);
+    return entry(guest, image_fd, main_pc, entry_pc, owner, owner ? sandboxInspect : NULL, error, capacity);
 }

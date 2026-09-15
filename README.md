@@ -23,9 +23,9 @@ github.com/xgo-dev/sandbox           sandbox.Run(fn), guest entry, value transfe
 github.com/xgo-dev/sandbox/sentry    c-shared Sentry backend -> sentrylib.so
 ```
 
-Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through `dlopen` and does not import the Sentry module or gVisor. Each module carries its own C ABI declarations so either module can be fetched independently. The ABI carries guest startup addresses, integer syscall fields and a synchronous callback.
+Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through `dlopen` and does not import the Sentry module or gVisor. Each module carries its own C ABI declarations so either module can be fetched independently. The ABI carries guest startup addresses, syscall registers and synchronous inspection callbacks. Structured arguments cross it as JSON.
 
-Automatic guest startup requires the new `RunSandboxAt` library symbol. Rebuild the Sentry module together with this host revision; the published `sentry/v0.1.0` library exports the older `RunSandbox` entry and is rejected with an explicit loading error. This change has not been released.
+This revision requires the `RunSandboxAtV2` library symbol. Rebuild the Sentry module together with this host revision; older libraries exporting `RunSandbox` or `RunSandboxAt` are rejected with an explicit loading error. This change has not been released.
 
 LLAR's formula integration stays in its own repository at `experimental/sandbox-formula`, where it can use LLAR's internal formula loader. The sandbox library has no LLAR or ixgo dependency.
 
@@ -35,14 +35,34 @@ LLAR's formula integration stays in its own repository at `experimental/sandbox-
 s := sandbox.Sandbox{
     Library: "/opt/llar/sentrylib.so",
     Inspect: func(call *sandbox.Syscall) {
-        // Inspect or change Number and Args before Sentry dispatches them.
-        // Pointer arguments are guest addresses, not host pointers.
+        if call.Name != "openat" {
+            return
+        }
+        args, err := call.Decode(64 << 10)
+        if err != nil {
+            log.Printf("decode openat: %v", err)
+            return
+        }
+        if args.Args[1].Value == "/src/input" {
+            args.Args[1].Value = "/cache/source/input"
+            if err := call.Rewrite(args); err != nil {
+                log.Printf("rewrite openat: %v", err)
+            }
+        }
     },
 }
 err := s.Run(fn)
 ```
 
 The default library is `sentrylib.so` beside the executable. One library remains loaded for the process lifetime. Inspector callbacks run synchronously in the original host Go runtime and are serialized; they must not access the captured objects while a call is active. An inspector panic is reported and prevents result writeback, but is not a mechanism for denying the syscall.
+
+`Name`, `Number` and the six raw `Args` are available without decoding guest memory. `Decode(maxBytes)` uses the argument classifications generated from the pinned gVisor strace tables. It returns arguments in syscall ABI order, each with `Format`, `Value` and `Decoded`. Integers use `json.Number` to preserve all 64 bits; flags remain numeric. Paths are strings, `execve`/`execveat` argument and environment vectors are arrays, and fixed input structures use the field names from gVisor's Linux ABI types. Binary buffers and non-UTF-8 strings use a `{"bytes":"<base64>"}` object. To replace such a buffer, assign `map[string]any{"bytes": []byte("replacement")}` to its `Value`.
+
+`Rewrite` compares against the most recent successful `Decode`, validates edits, creates guest mappings for changed input values, and updates the syscall registers before dispatch. Replacement buffers update their corresponding length argument. A longer path does not overwrite neighboring guest memory. The replacement mappings remain until the guest address space is destroyed, including across signal delivery and syscall restart; repeated replacements therefore consume additional guest mappings and memory. After rewriting, decode again before making another structured rewrite. Direct edits to `Number` or `Args` also require a fresh decode.
+
+`ReadMemory(address, dst)` lets the inspector parse guest memory itself without JSON. It copies through Sentry's memory manager, respects guest read permissions, and can return a partial count with an error. It never treats a guest address as a host pointer. `ReadMemory`, `Decode` and `Rewrite` are only valid during that callback; calls after it returns fail. Use them synchronously and do not concurrently modify the event fields. Other guest threads may change shared memory, so these reads are not atomic snapshots or a complete enforcement mechanism. Replacement mappings initially have read-only guest permissions, but the guest can change these with `mprotect` or replace the mapping.
+
+Only supported input layouts are decoded. Output buffers such as `read`'s destination, in/out values such as `ppoll`'s timeout, and unsupported nested formats such as iovecs and message headers retain their raw register value with `Decoded: false`. Unknown syscalls retain all six raw arguments. `Decode` fails instead of truncating when a guest address is unreadable or the caller's byte budget is exhausted; the budget includes string lookahead reads. Decode/rewrite errors do not automatically deny the syscall. With no `Inspect` callback, the backend skips inspection setup.
 
 ```text
 Host runtime                           c-shared Sentry runtime
@@ -61,9 +81,13 @@ Run(fn)
                                            |
                                       sysmsg -> Context.Switch returns
                                            |
-  Inspect(Number, Args) <-------------------+
+  Inspect(Name, Number, Args) <-------------+
        |                                   |
-       +-- modified Number, Args ---------> Sentry syscall dispatch
+       +-- optional Decode / ReadMemory --> MemoryManager.CopyIn
+       | <---------- values / bytes --------+
+       +-- optional Rewrite(values) ------> guest input mappings + registers
+       |                                   |
+       +-- callback returns --------------> Sentry syscall dispatch
                                            |
                                       next Switch -> guest continues
                                            |
@@ -81,6 +105,7 @@ The wrapper remains at `Context.Switch`; the sysmsg/Sentry shared-memory and fut
 ## Reading Order
 
 1. [host_linux.go](host_linux.go): public `Run`, image ownership, c-shared call, validation and return.
+   [inspect.go](inspect.go) defines the host inspection API; [sentry/codec_linux.go](sentry/codec_linux.go) decodes and rewrites syscall arguments through [sentry/inspect_linux.go](sentry/inspect_linux.go).
 2. [guest_linux.go](guest_linux.go): private guest entry, value restoration, closure invocation and result export.
 3. [transfer_linux.go](transfer_linux.go): retained object identities and host writeback.
 4. [image_linux.go](image_linux.go): typed graph traversal and relative image offsets.
@@ -121,6 +146,6 @@ This is an executable module with a general `func()` entry, not yet a production
 
 `sentry/build-linux.sh` builds only the shared library and its C headers. The root `build-linux.sh` builds the generic call smoke test and value-transfer tests, and checks that the host dependency list contains no gVisor packages. Neither script builds the other module.
 
-The smoke test covers automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. It also checks for descriptor growth after warming the shared platform.
+The smoke test covers automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. It also checks for descriptor growth after warming the shared platform, direct guest memory reads, structured `openat` path rewriting, `write` buffer/count rewriting and expired inspection access.
 
 LLAR's separate formula integration passes `OnBuild(ctx)` with both `Project.ReadFile` and `os.ReadFile`, a native output-directory callback, and result writeback to the original `Context` and `Project`. Both ARM64 and emulated AMD64 value-transfer tests reject malformed lengths, unauthorized code entries, unknown types, changed retention counts, merged identities and overlapping slices without changing host captures.
