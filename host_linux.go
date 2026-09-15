@@ -53,46 +53,17 @@ func sandboxInspect(owner C.uintptr_t, event *C.struct_syscall_event) {
 	defer func() {
 		a.mu.Lock()
 		a.active = false
-		a.read, a.decode, a.rewrite = nil, nil, nil
+		a.read = nil
 		a.mu.Unlock()
 	}()
-	writeRegisters := func(call *Syscall) {
-		event.number = C.uint64_t(call.Number)
-		for n, arg := range call.Args {
-			event.args[n] = C.uint64_t(arg)
-		}
-	}
-	readError := func(message *C.char) error {
-		if message == nil {
-			return nil
-		}
-		defer C.free(unsafe.Pointer(message))
-		return fmt.Errorf("sandbox inspection: %s", C.GoString(message))
-	}
 	a.read = func(address uint64, dst []byte) (int, error) {
 		var copied C.size_t
 		message := C.inspect_read(event, C.uint64_t(address), unsafe.Pointer(unsafe.SliceData(dst)), C.size_t(len(dst)), &copied)
-		return int(copied), readError(message)
-	}
-	a.decode = func(call *Syscall, budget int) ([]byte, error) {
-		writeRegisters(call)
-		var message *C.char
-		data := C.inspect_decode(event, C.size_t(budget), &message)
-		if err := readError(message); err != nil {
-			return nil, err
+		if message == nil {
+			return int(copied), nil
 		}
-		defer C.free(unsafe.Pointer(data))
-		return []byte(C.GoString(data)), nil
-	}
-	a.rewrite = func(call *Syscall, data []byte) error {
-		writeRegisters(call)
-		if err := readError(C.inspect_rewrite(event, unsafe.Pointer(unsafe.SliceData(data)), C.size_t(len(data)))); err != nil {
-			return err
-		}
-		for n, arg := range event.args {
-			call.Args[n] = uint64(arg)
-		}
-		return nil
+		defer C.free(unsafe.Pointer(message))
+		return int(copied), fmt.Errorf("sandbox inspection: %s", C.GoString(message))
 	}
 	i.fn(&v)
 	event.number = C.uint64_t(v.Number)

@@ -26,10 +26,10 @@ int sandbox_load(char *library, char *guest, int image_fd, uintptr_t main_pc,
         return 1;
     }
     dlerror();
-    run_sentry_fn run = (run_sentry_fn)dlsym(handle, "RunSandboxAtV2");
+    run_sentry_fn run = (run_sentry_fn)dlsym(handle, "RunSandbox");
     const char *message = dlerror();
     if (message != NULL) {
-        snprintf(error, capacity, "dlsym RunSandboxAtV2: %s; rebuild the Sentry library for syscall inspection ABI v2", message);
+        snprintf(error, capacity, "dlsym RunSandbox: %s", message);
         return 1;
     }
     // Go runtimes leave background threads alive. Never dlclose their code.

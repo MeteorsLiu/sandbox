@@ -183,32 +183,25 @@ func inspectMemory() error {
 	if err := os.Chmod(dir, 0755); err != nil {
 		return err
 	}
-	requested := filepath.Join(dir, "missing")
-	actual := filepath.Join(dir, "longer-replacement-file")
-	if err := os.WriteFile(actual, []byte("redirected file content"), 0644); err != nil {
+	path := filepath.Join(dir, "input")
+	if err := os.WriteFile(path, []byte("fixture content"), 0644); err != nil {
 		return err
 	}
 	var retained *sandbox.Syscall
-	var snapshot *sandbox.DecodedSyscall
 	var inspectionErr error
-	pathChanged, bufferChanged := false, false
+	pathRead, bufferRead := false, false
 	s := sandbox.Sandbox{Inspect: func(call *sandbox.Syscall) {
 		if inspectionErr != nil {
 			return
 		}
 		switch call.Name {
 		case "openat":
-			decoded, err := call.Decode(8192)
-			if err != nil {
-				inspectionErr = err
-				return
-			}
-			if decoded.Args[1].Value != requested {
-				return
-			}
-			buf := make([]byte, len(requested)+1)
+			buf := make([]byte, len(path)+1)
 			n, err := call.ReadMemory(call.Args[1], buf)
-			if err != nil || n != len(buf) || string(buf) != requested+"\x00" {
+			if string(buf[:n]) != path+"\x00" {
+				return
+			}
+			if err != nil {
 				inspectionErr = fmt.Errorf("guest memory read: %d %v", n, err)
 				return
 			}
@@ -216,28 +209,29 @@ func inspectMemory() error {
 				inspectionErr = fmt.Errorf("unmapped guest memory read succeeded")
 				return
 			}
-			decoded.Args[1].Value = actual
-			inspectionErr = call.Rewrite(decoded)
-			pathChanged = inspectionErr == nil
-			retained, snapshot = call, decoded
+			pathRead = true
+			retained = call
 		case "write":
-			if call.Args[2] != uint64(len("before-interceptor")) {
+			if call.Args[2] != uint64(len("inspection payload")) {
 				return
 			}
-			decoded, err := call.Decode(1024)
+			buf := make([]byte, len("inspection payload"))
+			n, err := call.ReadMemory(call.Args[1], buf)
 			if err != nil {
 				inspectionErr = err
 				return
 			}
-			decoded.Args[1].Value = map[string]any{"bytes": []byte("after-interceptor-longer")}
-			inspectionErr = call.Rewrite(decoded)
-			bufferChanged = inspectionErr == nil
+			if string(buf[:n]) != "inspection payload" {
+				return
+			}
+			bufferRead = true
+			call.Args[2] = uint64(len("inspection"))
 		}
 	}}
 	var content, received string
 	var written int
 	err = s.Run(func() {
-		data, err := os.ReadFile(requested)
+		data, err := os.ReadFile(path)
 		if err != nil {
 			panic(err)
 		}
@@ -248,7 +242,7 @@ func inspectMemory() error {
 		}
 		defer unix.Close(pipe[0])
 		defer unix.Close(pipe[1])
-		written, err = unix.Write(pipe[1], []byte("before-interceptor"))
+		written, err = unix.Write(pipe[1], []byte("inspection payload"))
 		if err != nil {
 			panic(err)
 		}
@@ -260,22 +254,16 @@ func inspectMemory() error {
 		received = string(buf[:n])
 	})
 	if inspectionErr != nil {
-		return fmt.Errorf("structured inspector: %w", inspectionErr)
+		return fmt.Errorf("memory inspector: %w", inspectionErr)
 	}
 	if err != nil {
 		return fmt.Errorf("guest memory inspection: %w", err)
 	}
-	check(pathChanged && content == "redirected file content", "openat pathname rewrite")
-	check(bufferChanged && received == "after-interceptor-longer" && written == len(received), "write buffer and count rewrite")
+	check(pathRead && content == "fixture content", "openat pathname read")
+	check(bufferRead && received == "inspection" && written == len(received), "write buffer read and raw count edit")
 	if _, err := retained.ReadMemory(1, make([]byte, 1)); err == nil {
 		return fmt.Errorf("retained ReadMemory was accepted")
 	}
-	if _, err := retained.Decode(1024); err == nil {
-		return fmt.Errorf("retained Decode was accepted")
-	}
-	if err := retained.Rewrite(snapshot); err == nil {
-		return fmt.Errorf("retained Rewrite was accepted")
-	}
-	fmt.Println("PASS lazy structured decode, guest memory reads, openat path and write buffer/count rewrites, callback lifetime")
+	fmt.Println("PASS guest path/buffer reads, raw syscall argument edit, invalid address and callback lifetime")
 	return nil
 }

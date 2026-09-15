@@ -1,52 +1,37 @@
 package sandbox
 
 import (
-	"encoding/json"
-	"strings"
+	"errors"
+	"io"
 	"testing"
 )
 
-func TestLazyInspectionAndLifetime(t *testing.T) {
-	reads, decodes := 0, 0
+func TestReadMemoryAndLifetime(t *testing.T) {
+	reads := 0
 	access := &syscallAccess{
 		active: true,
-		read: func(_ uint64, dst []byte) (int, error) {
+		read: func(address uint64, dst []byte) (int, error) {
 			reads++
-			return copy(dst, "data"), nil
-		},
-		decode: func(_ *Syscall, _ int) ([]byte, error) {
-			decodes++
-			return []byte(`{"number":1,"name":"test","args":[{"format":"Hex","value":18446744073709551615,"decoded":true}]}`), nil
-		},
-		rewrite: func(_ *Syscall, data []byte) error {
-			if !strings.Contains(string(data), "18446744073709551615") {
-				t.Fatal("64-bit argument lost precision")
+			if address != 0x1000 {
+				t.Fatalf("wrong guest address: %#x", address)
 			}
-			return nil
+			return copy(dst, "data"), io.ErrUnexpectedEOF
 		},
 	}
 	call := &Syscall{Number: 1, Name: "test", access: access}
-	if call.Name != "test" || reads != 0 || decodes != 0 {
-		t.Fatal("filtering unexpectedly decoded memory")
+	if call.Name != "test" || reads != 0 {
+		t.Fatal("filtering unexpectedly read guest memory")
 	}
-	decoded, err := call.Decode(1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decoded.Args[0].Value.(json.Number).String() != "18446744073709551615" {
-		t.Fatal("argument precision lost")
-	}
-	if err := call.Rewrite(decoded); err != nil {
-		t.Fatal(err)
+	var buf [8]byte
+	n, err := call.ReadMemory(0x1000, buf[:])
+	if n != 4 || string(buf[:n]) != "data" || !errors.Is(err, io.ErrUnexpectedEOF) || reads != 1 {
+		t.Fatalf("partial read was not preserved: %d %q %v", n, buf, err)
 	}
 	access.active = false
-	if _, err := call.ReadMemory(1, make([]byte, 4)); err == nil {
+	if _, err := call.ReadMemory(0x1000, buf[:]); err == nil || reads != 1 {
 		t.Fatal("retained callback could access guest memory")
 	}
-	if _, err := call.Decode(1024); err == nil {
-		t.Fatal("retained callback could decode arguments")
-	}
-	if err := call.Rewrite(decoded); err == nil {
-		t.Fatal("retained callback could rewrite arguments")
+	if _, err := new(Syscall).ReadMemory(0x1000, buf[:]); err == nil {
+		t.Fatal("event without an inspector could access guest memory")
 	}
 }

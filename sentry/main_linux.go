@@ -24,8 +24,8 @@ import (
 
 var libraryMu sync.Mutex
 
-//export RunSandboxAtV2
-func RunSandboxAtV2(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
+//export RunSandbox
+func RunSandbox(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
 	libraryMu.Lock()
 	defer libraryMu.Unlock()
 	runtime.LockOSThread()
@@ -49,8 +49,8 @@ func RunSandboxAtV2(guest *C.char, imageFD C.int, mainPC, entryPC, owner C.uintp
 			return
 		}
 		task := kernel.TaskFromContext(ctx)
-		codec := &syscallCodec{memory: sentryMemory{ctx: task.Kernel().SupervisorContext(), mm: task.MemoryManager()}}
-		handle := cgo.NewHandle(codec)
+		memory := sentryMemory{ctx: task.Kernel().SupervisorContext(), mm: task.MemoryManager()}
+		handle := cgo.NewHandle(memory)
 		defer handle.Delete()
 		event := C.struct_syscall_event{number: C.uint64_t(ac.SyscallNo())}
 		name := C.CString(task.SyscallTable().LookupName(ac.SyscallNo()))
