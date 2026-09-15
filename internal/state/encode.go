@@ -65,6 +65,8 @@ type encodeState struct {
 	// types is the type database.
 	types typeEncodeDatabase
 
+	native nativeState
+
 	// lastID is the last allocated object ID.
 	lastID objectID
 
@@ -499,21 +501,14 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *object) {
 	// Look the type up in the database.
 	te, ok := es.types.Lookup(obj.Type())
 	if te == nil {
-		if obj.NumField() == 0 {
-			// Allow unregistered anonymous, empty structs. This
-			// will just return success without ever invoking the
-			// passed function. This uses the immutable EmptyStruct
-			// variable to prevent an allocation in this case.
-			//
-			// Note that this mechanism does *not* work for
-			// interfaces in general. So you can't dispatch
-			// non-registered empty structs via interfaces because
-			// then they can't be restored.
-			s.Alloc(0)
-			return
+		// Compiler-generated closure storage and ordinary captured structs
+		// cannot require generated StateSave methods. Their decoder already
+		// has the type from the pointer, capture layout or interface record.
+		s.Alloc(obj.NumField())
+		for i := 0; i < obj.NumField(); i++ {
+			es.encodeObject(obj.Field(i), encodeDefault, s.Field(i))
 		}
-		// We need a SaverLoader for struct types.
-		Failf("struct %T does not implement SaverLoader", obj.Interface())
+		return
 	}
 	if !ok {
 		// Queue the type to be serialized.
@@ -552,6 +547,9 @@ func (es *encodeState) encodeArray(obj reflect.Value, dest *object) {
 
 // findType recursively finds type information.
 func (es *encodeState) findType(typ reflect.Type) typeSpec {
+	if pc, ok := es.native.storage[typ]; ok {
+		return closureType(pc)
+	}
 	// First: check if this is a proper type. It's possible for pointers,
 	// slices, arrays, maps, etc to all have some different type.
 	te, ok := es.types.Lookup(typ)
@@ -563,31 +561,24 @@ func (es *encodeState) findType(typ reflect.Type) typeSpec {
 		return typeSpecID(te.ID)
 	}
 
-	switch typ.Kind() {
-	case reflect.Ptr:
-		return &pointerType{
-			Type: es.findType(typ.Elem()),
+	if typ.Name() == "" {
+		switch typ.Kind() {
+		case reflect.Ptr:
+			return &pointerType{Type: es.findType(typ.Elem())}
+		case reflect.Slice:
+			return &sliceType{Type: es.findType(typ.Elem())}
+		case reflect.Array:
+			return &arrayType{Count: uintValue(typ.Len()), Type: es.findType(typ.Elem())}
+		case reflect.Map:
+			return &mapType{Key: es.findType(typ.Key()), Value: es.findType(typ.Elem())}
 		}
-	case reflect.Slice:
-		return &sliceType{
-			Type: es.findType(typ.Elem()),
-		}
-	case reflect.Array:
-		return &arrayType{
-			Count: uintValue(typ.Len()),
-			Type:  es.findType(typ.Elem()),
-		}
-	case reflect.Map:
-		return &mapType{
-			Key:   es.findType(typ.Key()),
-			Value: es.findType(typ.Elem()),
-		}
-	default:
-		// After potentially chasing many pointers, the
-		// ultimate type of the object is not known.
-		Failf("type %q is not known", typ)
 	}
-	panic("unreachable")
+	m := es.native.metadata()
+	addr := nativeTypeAddress(typ)
+	if m.types[addr] != typ {
+		Failf("type %q is not present in executable DWARF", typ)
+	}
+	return nativeType(addr)
 }
 
 // encodeInterface encodes an interface.
@@ -615,6 +606,8 @@ func (es *encodeState) encodeInterface(obj reflect.Value, dest *object) {
 // object composed entirely of primitives.
 func isPrimitiveZero(typ reflect.Type) bool {
 	switch typ.Kind() {
+	case reflect.Func:
+		return true
 	case reflect.Ptr:
 		// Pointers are always treated as primitive types because we
 		// won't encode directly from here. Returning true here won't
@@ -674,6 +667,9 @@ const (
 
 // encodeObject encodes an object.
 func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest *object) {
+	if obj.CanAddr() && !obj.CanInterface() {
+		obj = reflectValueRWAddr(obj).Elem()
+	}
 	if how == encodeDefault && isPrimitiveZero(obj.Type()) && obj.IsZero() {
 		*dest = nilValue{}
 		return
@@ -738,6 +734,8 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 		r := new(refValue)
 		*dest = r
 		es.resolve(obj, r)
+	case reflect.Func:
+		es.encodeFunction(obj, dest)
 	default:
 		Failf("unknown object %#v", obj.Interface())
 		panic("unreachable")

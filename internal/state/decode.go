@@ -157,6 +157,9 @@ type decodeState struct {
 	// types is the type database.
 	types typeDecodeDatabase
 
+	native    nativeState
+	functions []decodedFunction
+
 	// objectByID is the set of objects in progress.
 	objectsByID []*objectDecodeState
 
@@ -255,6 +258,8 @@ func (ds *decodeState) waitObject(ods *objectDecodeState, encoded object, callba
 	} else if iv, ok := encoded.(*interfaceValue); ok {
 		// It's an interface (wait recursively).
 		ds.waitObject(ods, iv.Value, callback)
+	} else if fv, ok := encoded.(*functionValue); ok && fv.Env.Root != 0 {
+		ds.wait(ods, objectID(fv.Env.Root), callback)
 	} else if callback != nil {
 		// Nothing to wait for: execute the callback immediately.
 		callback()
@@ -381,14 +386,13 @@ func (od *objectDecoder) afterLoad(fn func()) {
 // decodeStruct decodes a struct value.
 func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, encoded *structValue) {
 	if encoded.TypeID == 0 {
-		// Allow anonymous empty structs, but only if the encoded
-		// object also has no fields.
-		if encoded.Fields() == 0 && obj.NumField() == 0 {
-			return
+		if encoded.Fields() != obj.NumField() {
+			Failf("struct field count %d does not match %v", encoded.Fields(), obj.Type())
 		}
-
-		// Propagate an error.
-		Failf("empty struct on wire %#v has field mismatch with type %q", encoded, obj.Type().Name())
+		for i := 0; i < obj.NumField(); i++ {
+			ds.decodeObject(ods, obj.Field(i), *encoded.Field(i))
+		}
+		return
 	}
 
 	// Lookup the object type.
@@ -458,6 +462,14 @@ func (ds *decodeState) findType(t typeSpec) reflect.Type {
 		return reflect.SliceOf(ds.findType(x.Type))
 	case *mapType:
 		return reflect.MapOf(ds.findType(x.Key), ds.findType(x.Value))
+	case nativeType:
+		typ := ds.native.metadata().types[uintptr(x)]
+		if typ == nil {
+			Failf("native type %#x is not present in executable DWARF", x)
+		}
+		return typ
+	case closureType:
+		return ds.native.layout(uintptr(x))
 	default:
 		// Should not happen.
 		Failf("unknown type %#v", t)
@@ -511,6 +523,9 @@ func isComplexEq(x complex128, y complex128) bool {
 
 // decodeObject decodes a object value.
 func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, encoded object) {
+	if obj.CanAddr() && !obj.CanSet() {
+		obj = reflectValueRWAddr(obj).Elem()
+	}
 	switch x := encoded.(type) {
 	case nilValue: // Fast path: first.
 		// We leave obj alone here. That's because if obj represents an
@@ -588,6 +603,8 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		ds.decodeMap(ods, obj, x)
 	case *interfaceValue:
 		ds.decodeInterface(ods, obj, x)
+	case *functionValue:
+		ds.decodeFunction(obj, x)
 	default:
 		// Should not happen, not propagated as an error.
 		Failf("unknown object %#v for %q", encoded, obj.Type().Name())
@@ -687,6 +704,13 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	}
 	if numDeferred != 0 {
 		Failf("still had %d deferred objects", numDeferred)
+	}
+
+	// Validate all closure storage before callbacks can invoke a restored func.
+	for _, f := range ds.functions {
+		if f.storage.Field(0).Uint() != uint64(f.pc) {
+			Failf("closure storage does not match PC %#x", f.pc)
+		}
 	}
 
 	// Scan and fire all callbacks. We iterate over the list of incomplete

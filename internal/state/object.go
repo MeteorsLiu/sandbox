@@ -327,6 +327,22 @@ type sliceValue struct {
 	Ref      refValue
 }
 
+// functionValue identifies code in the same executable and the closure storage
+// in the object graph. Env references preserve shared and recursive closures.
+type functionValue struct {
+	PC  uintValue
+	Env refValue
+}
+
+func (f *functionValue) save(w *writer) {
+	f.PC.save(w)
+	f.Env.save(w)
+}
+
+func (*functionValue) load(r *reader) object {
+	return &functionValue{PC: loadUint(r), Env: loadRef(r)}
+}
+
 // loadSlice loads an object of type sliceValue.
 func loadSlice(r *reader) sliceValue {
 	return sliceValue{
@@ -498,6 +514,14 @@ type nilType struct{}
 
 func (nilType) isTypeSpec() {}
 
+// nativeType names a static Go type in the same executable. closureType names
+// a closure storage type recovered from that executable's capture DWARF.
+type nativeType uintValue
+type closureType uintValue
+
+func (nativeType) isTypeSpec()  {}
+func (closureType) isTypeSpec() {}
+
 // typeSpec types.
 //
 // These use a distinct encoding on the wire, as they are used only in the
@@ -510,6 +534,8 @@ const (
 	typeSpecSlice
 	typeSpecMap
 	typeSpecNil
+	typeSpecNative
+	typeSpecClosure
 )
 
 // loadTypeSpec loads typeSpec values.
@@ -537,6 +563,10 @@ func loadTypeSpec(r *reader) typeSpec {
 		}
 	case typeSpecNil:
 		return nilType{}
+	case typeSpecNative:
+		return nativeType(loadUint(r))
+	case typeSpecClosure:
+		return closureType(loadUint(r))
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr))
@@ -565,6 +595,12 @@ func saveTypeSpec(w *writer, t typeSpec) {
 		saveTypeSpec(w, x.Value)
 	case nilType:
 		typeSpecNil.save(w)
+	case nativeType:
+		typeSpecNative.save(w)
+		uintValue(x).save(w)
+	case closureType:
+		typeSpecClosure.save(w)
+		uintValue(x).save(w)
 	default:
 		// This should not happen?
 		panic(fmt.Errorf("unknown type %T", t))
@@ -773,6 +809,7 @@ const (
 	typeComplex64
 	typeComplex128
 	typeType
+	typeFunction
 )
 
 // saveObject saves the given object.
@@ -836,6 +873,9 @@ func saveObject(w *writer, obj object) {
 	case *complex128Value:
 		typeComplex128.save(w)
 		x.save(w)
+	case *functionValue:
+		typeFunction.save(w)
+		x.save(w)
 	default:
 		panic(fmt.Errorf("unknown type: %#v", obj))
 	}
@@ -884,6 +924,8 @@ func loadObject(r *reader) object {
 		return ((*complex128Value)(nil)).load(r) // Escapes.
 	case typeType:
 		return ((*typeDescriptor)(nil)).load(r) // Escapes.
+	case typeFunction:
+		return ((*functionValue)(nil)).load(r)
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr))
