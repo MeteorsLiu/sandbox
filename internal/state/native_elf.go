@@ -152,8 +152,9 @@ func (m *nativeMetadata) layout(pc uintptr, captureFree bool) (reflect.Type, err
 		m.layouts[pc] = typ
 		return typ, nil
 	}
-	if strings.HasSuffix(name, "-fm") {
-		prefix := name[:strings.LastIndexByte(name, '.')]
+	boundMethod := strings.HasSuffix(name, "-fm")
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		prefix := name[:i]
 		pkg, recv := "", prefix
 		if i := strings.LastIndexByte(prefix, '.'); i >= 0 {
 			pkg, recv = prefix[:i], prefix[i+1:]
@@ -167,20 +168,26 @@ func (m *nativeMetadata) layout(pc uintptr, captureFree bool) (reflect.Type, err
 			recv = recv[2 : len(recv)-1]
 		}
 		typ, ok := m.receivers[pkg+"."+recv]
-		if !ok || typ == nil {
+		if boundMethod && (!ok || typ == nil) {
 			return nil, fmt.Errorf("method %s has no unique static receiver type", name)
 		}
-		if pointer {
-			typ = reflect.PointerTo(typ)
+		if ok && typ != nil {
+			// reflect.Type.Method creates a heap funcval for T.M or (*T).M.
+			// Its receiver is an argument; only M-fm captures a receiver.
+			layout := reflect.TypeFor[struct{ F uintptr }]()
+			if boundMethod {
+				if pointer {
+					typ = reflect.PointerTo(typ)
+				}
+				// MethodValueType uses F + R, including zero-sized receivers.
+				layout = reflect.StructOf([]reflect.StructField{
+					{Name: "F", Type: reflect.TypeFor[uintptr]()},
+					{Name: "R", Type: typ},
+				})
+			}
+			m.layouts[pc] = layout
+			return layout, nil
 		}
-		// MethodValueType in the Go compiler uses F + R, including a
-		// zero-sized R. A nil pointer receiver still occupies its field.
-		layout := reflect.StructOf([]reflect.StructField{
-			{Name: "F", Type: reflect.TypeFor[uintptr]()},
-			{Name: "R", Type: typ},
-		})
-		m.layouts[pc] = layout
-		return layout, nil
 	}
 	// Try lexical parents, including inlining prefixes. For p.F.factory.func1,
 	// p.F.factory may not exist, while p.F contains the inlined allocation.

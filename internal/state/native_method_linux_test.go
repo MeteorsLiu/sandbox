@@ -23,6 +23,11 @@ func (r *nativeMethodReceiver) IsNil() bool   { return r == nil }
 func (r nativeMethodReceiver) Value() int     { return r.N }
 func (r nativeMethodReceiver) private() int   { return r.N }
 
+//go:noinline
+func (r *nativeMethodReceiver) Closure(n int) func() int {
+	return func() int { r.N += n; return r.N }
+}
+
 type nativeMethodInterface interface{ Add(int) int }
 
 //go:noinline
@@ -90,6 +95,60 @@ func TestNativeMethodSharedReceiver(t *testing.T) {
 	}
 	if dst.Receiver == r || dst.Receiver.N != 16 || dst.Receiver.Next != dst.Receiver || r.N != 10 {
 		t.Fatal("receiver alias, cycle or isolation changed")
+	}
+}
+
+func TestNativeReflectedMethods(t *testing.T) {
+	m, err := loadNativeMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.path = filepath.Join(t.TempDir(), "missing-executable")
+	for _, test := range []struct {
+		name string
+		typ  reflect.Type
+		args []reflect.Value
+	}{
+		{"Add", reflect.TypeFor[*nativeMethodReceiver](), []reflect.Value{reflect.ValueOf(&nativeMethodReceiver{N: 40}), reflect.ValueOf(2)}},
+		{"Value", reflect.TypeFor[nativeMethodReceiver](), []reflect.Value{reflect.ValueOf(nativeMethodReceiver{N: 42})}},
+		{"Value", reflect.TypeFor[*nativeMethodReceiver](), []reflect.Value{reflect.ValueOf(&nativeMethodReceiver{N: 42})}},
+		{"Value", reflect.TypeFor[nativeScalarReceiver](), []reflect.Value{reflect.ValueOf(nativeScalarReceiver(42))}},
+		{"Value", reflect.TypeFor[nativeEmptyReceiver](), []reflect.Value{reflect.ValueOf(nativeEmptyReceiver{})}},
+	} {
+		t.Run(test.typ.String()+"."+test.name, func(t *testing.T) {
+			method, ok := test.typ.MethodByName(test.name)
+			if !ok {
+				t.Fatal("method not found")
+			}
+			layout, err := m.layout(method.Func.Pointer(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if layout != reflect.TypeFor[struct{ F uintptr }]() {
+				t.Fatalf("unbound method has a captured receiver: %v", layout)
+			}
+			src := method.Func.Interface()
+			var dst any
+			roundtrip(t, &src, &dst)
+			runtime.GC()
+			if got := reflect.ValueOf(dst).Call(test.args)[0].Int(); got != 42 {
+				t.Fatalf("restored method returned %d", got)
+			}
+		})
+	}
+	if len(m.scanned) != 0 {
+		t.Fatalf("method lookup scanned %d functions", len(m.scanned))
+	}
+}
+
+func TestNativeClosureInsideMethod(t *testing.T) {
+	r := &nativeMethodReceiver{N: 40}
+	fn := r.Closure(2)
+	var restored func() int
+	roundtrip(t, &fn, &restored)
+	runtime.GC()
+	if restored() != 42 || restored() != 44 || r.N != 40 {
+		t.Fatal("closure inside a method lost its captured environment")
 	}
 }
 
