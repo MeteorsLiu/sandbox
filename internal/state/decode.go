@@ -262,6 +262,8 @@ func (ds *decodeState) waitObject(ods *objectDecodeState, encoded object, callba
 	} else if iv, ok := encoded.(*interfaceValue); ok {
 		// It's an interface (wait recursively).
 		ds.waitObject(ods, iv.Value, callback)
+	} else if rv, ok := encoded.(*reflectedValue); ok {
+		ds.waitObject(ods, rv.Value, callback)
 	} else if fv, ok := encoded.(*functionValue); ok && fv.Env.Root != 0 {
 		ds.wait(ods, objectID(fv.Env.Root), callback)
 	} else if callback != nil {
@@ -475,12 +477,6 @@ func (ds *decodeState) findType(t typeSpec) reflect.Type {
 		return reflect.SliceOf(ds.findType(x.Type))
 	case *mapType:
 		return reflect.MapOf(ds.findType(x.Key), ds.findType(x.Value))
-	case nativeType:
-		typ := ds.native.metadata().types[uintptr(x)]
-		if typ == nil {
-			Failf("native type %#x is not present in executable DWARF", x)
-		}
-		return typ
 	case closureType:
 		return ds.native.layout(uintptr(x))
 	default:
@@ -625,6 +621,33 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 			Failf("reflect.Type cannot be assigned to %v", obj.Type())
 		}
 		obj.Set(value)
+	case *reflectedValue:
+		if obj.Type() != reflect.TypeFor[reflect.Value]() {
+			Failf("reflect.Value cannot be assigned to %v", obj.Type())
+		}
+		if _, invalid := x.Type.(nilType); invalid {
+			if _, empty := x.Value.(nilValue); !empty || x.Addressable {
+				Failf("invalid zero reflect.Value")
+			}
+			obj.SetZero()
+			return
+		}
+		typ := ds.findType(x.Type)
+		var value reflect.Value
+		if x.Addressable {
+			ref, ok := x.Value.(*refValue)
+			if !ok || ref.Root == 0 || typ.Kind() != reflect.Pointer {
+				Failf("addressable reflect.Value requires a non-nil pointer")
+			}
+			value = reflect.New(typ).Elem()
+			ds.decodeObject(ods, value, x.Value)
+			value = value.Elem()
+		} else {
+			storage := reflect.New(typ).Elem()
+			ds.decodeObject(ods, storage, x.Value)
+			value = reflectValueUnaddressable(storage)
+		}
+		obj.Set(reflect.ValueOf(value))
 	default:
 		// Should not happen, not propagated as an error.
 		Failf("unknown object %#v for %q", encoded, obj.Type().Name())

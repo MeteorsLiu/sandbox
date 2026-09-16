@@ -354,6 +354,26 @@ func (*reflectTypeValue) load(r *reader) object {
 	return &reflectTypeValue{Type: loadTypeSpec(r)}
 }
 
+// reflectedValue saves the represented value, not reflect.Value's runtime
+// fields. Addressable values encode their address so aliases remain shared.
+type reflectedValue struct {
+	Type        typeSpec
+	Value       object
+	Addressable bool
+}
+
+func (v *reflectedValue) save(w *writer) {
+	saveTypeSpec(w, v.Type)
+	boolValue(v.Addressable).save(w)
+	saveObject(w, v.Value)
+}
+
+func (*reflectedValue) load(r *reader) object {
+	typ := loadTypeSpec(r)
+	addressable := loadBool(r)
+	return &reflectedValue{Type: typ, Value: loadObject(r), Addressable: bool(addressable)}
+}
+
 // loadSlice loads an object of type sliceValue.
 func loadSlice(r *reader) sliceValue {
 	return sliceValue{
@@ -533,12 +553,9 @@ type nilType struct{}
 
 func (nilType) isTypeSpec() {}
 
-// nativeType names a static Go type in the same executable. closureType names
-// a closure storage type recovered from that executable's capture DWARF.
-type nativeType uintValue
+// closureType names a closure storage type recovered from the executable.
 type closureType uintValue
 
-func (nativeType) isTypeSpec()  {}
 func (closureType) isTypeSpec() {}
 
 // typeSpec types.
@@ -553,7 +570,6 @@ const (
 	typeSpecSlice
 	typeSpecMap
 	typeSpecNil
-	typeSpecNative
 	typeSpecClosure
 	typeSpecReflected
 )
@@ -583,8 +599,6 @@ func loadTypeSpec(r *reader) typeSpec {
 		}
 	case typeSpecNil:
 		return nilType{}
-	case typeSpecNative:
-		return nativeType(loadUint(r))
 	case typeSpecClosure:
 		return closureType(loadUint(r))
 	case typeSpecReflected:
@@ -617,9 +631,6 @@ func saveTypeSpec(w *writer, t typeSpec) {
 		saveTypeSpec(w, x.Value)
 	case nilType:
 		typeSpecNil.save(w)
-	case nativeType:
-		typeSpecNative.save(w)
-		uintValue(x).save(w)
 	case closureType:
 		typeSpecClosure.save(w)
 		uintValue(x).save(w)
@@ -836,6 +847,7 @@ const (
 	typeType
 	typeFunction
 	typeReflectType
+	typeReflectValue
 )
 
 // saveObject saves the given object.
@@ -905,6 +917,9 @@ func saveObject(w *writer, obj object) {
 	case *reflectTypeValue:
 		typeReflectType.save(w)
 		x.save(w)
+	case *reflectedValue:
+		typeReflectValue.save(w)
+		x.save(w)
 	default:
 		panic(fmt.Errorf("unknown type: %#v", obj))
 	}
@@ -957,6 +972,8 @@ func loadObject(r *reader) object {
 		return ((*functionValue)(nil)).load(r)
 	case typeReflectType:
 		return ((*reflectTypeValue)(nil)).load(r)
+	case typeReflectValue:
+		return ((*reflectedValue)(nil)).load(r)
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr))

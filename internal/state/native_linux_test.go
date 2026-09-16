@@ -15,6 +15,96 @@ import (
 
 func nativeDouble(n int) int { return n * 2 }
 
+func nativeELFClosure(n *int) func() int {
+	value := reflect.ValueOf(n).Elem()
+	return func() int {
+		value.SetInt(value.Int() + 1)
+		return int(value.Int())
+	}
+}
+
+func TestNativeELFLayoutCache(t *testing.T) {
+	m, err := loadNativeMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 42
+	fn := nativeELFClosure(&n)
+	pc := reflect.ValueOf(fn).Pointer()
+	layout, err := m.layout(pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.Size() != 32 || layout.NumField() != 2 || layout.Field(1).Type != reflect.TypeFor[reflect.Value]() || layout.Field(1).Offset != 8 {
+		t.Fatalf("unexpected environment: %v", layout)
+	}
+	if len(m.scanned) != 1 {
+		t.Fatalf("scanned %d functions, want only the factory", len(m.scanned))
+	}
+	for name := range m.scanned {
+		t.Logf("read %s: %d bytes", name, m.names[name].Size)
+	}
+	// A cached lookup must not reopen or read the executable.
+	m.path = filepath.Join(t.TempDir(), "missing-executable")
+	for i := 0; i < 3; i++ {
+		got, err := m.layout(pc)
+		if err != nil || got != layout {
+			t.Fatalf("cached lookup: %v, %v", got, err)
+		}
+	}
+	runtime.KeepAlive(fn)
+}
+
+func nativeInlineClosure(n *int) func() int {
+	return func() int { *n++; return *n }
+}
+
+func TestNativeInlinedFactory(t *testing.T) {
+	n := 10
+	fn := nativeInlineClosure(&n)
+	var dst func() int
+	roundtrip(t, &fn, &dst)
+	if got := dst(); got != 11 || n != 10 {
+		t.Fatalf("inlined factory: result=%d, source=%d", got, n)
+	}
+}
+
+func TestNativeFactoryWithMethodValue(t *testing.T) {
+	method := reflectedNamed{Value: 42}.Number
+	t.Logf("unrelated method value: %p", method)
+	n := 10
+	fn := func() int { n++; return n }
+	var dst func() int
+	roundtrip(t, &fn, &dst)
+	if got := dst(); got != 11 || n != 10 {
+		t.Fatalf("factory with method value: result=%d, source=%d", got, n)
+	}
+}
+
+//go:noinline
+func nativeScalarClosure(n int) func() int { return func() int { return n } }
+
+func TestNativeScalarCapture(t *testing.T) {
+	fn := nativeScalarClosure(42)
+	var dst func() int
+	roundtrip(t, &fn, &dst)
+	if got := dst(); got != 42 {
+		t.Fatalf("scalar capture: %d", got)
+	}
+}
+
+func requireNativeValueCapture(t *testing.T, fn any) {
+	t.Helper()
+	var native nativeState
+	layout := native.layout(reflect.ValueOf(fn).Pointer())
+	for i := 1; i < layout.NumField(); i++ {
+		if layout.Field(i).Type == reflect.TypeFor[reflect.Value]() {
+			return
+		}
+	}
+	t.Fatal("ELF closure layout omitted the reflect.Value capture")
+}
+
 func TestNativeFunction(t *testing.T) {
 	for _, src := range []func(int) int{nil, nativeDouble} {
 		var dst func(int) int
@@ -165,12 +255,14 @@ func TestNativeNewProcess(t *testing.T) {
 	p := &captured{n: 40}
 	var value any = p
 	typ := reflect.StructOf([]reflect.StructField{{Name: "Result", Type: reflect.TypeFor[int](), Tag: `state:"closure"`}})
+	field := reflect.ValueOf(&p.n).Elem()
 	fn := func() int {
-		p.n++
+		field.SetInt(field.Int() + 1)
 		result := reflect.New(typ).Elem()
 		result.Field(0).SetInt(int64(value.(*captured).n + 1))
 		return int(result.Field(0).Int())
 	}
+	requireNativeValueCapture(t, fn)
 	mem := make([]byte, 1<<20)
 	n, _, err := Save(context.Background(), mem, &fn)
 	if err != nil {
@@ -191,6 +283,21 @@ func TestNativeNewProcess(t *testing.T) {
 	}
 	if p.n != 40 {
 		t.Fatal("child changed the original capture")
+	}
+}
+
+func TestNativeReflectValue(t *testing.T) {
+	n := 42
+	value := reflect.ValueOf(&n).Elem()
+	fn := func() int {
+		value.SetInt(value.Int() + 1)
+		return int(value.Int())
+	}
+	requireNativeValueCapture(t, fn)
+	var dst func() int
+	roundtrip(t, &fn, &dst)
+	if got := dst(); got != 43 || n != 42 {
+		t.Fatalf("reflected capture: result=%d, source=%d", got, n)
 	}
 }
 

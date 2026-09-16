@@ -30,6 +30,17 @@ func reflectValueRWAddr(obj reflect.Value) reflect.Value {
 	return reflect.NewAt(obj.Type(), unsafe.Pointer(obj.UnsafeAddr()))
 }
 
+// reflectValueUnaddressable removes addressability without copying the value.
+// For example, an AfterLoad callback must update the same struct observed by
+// the returned Value. Converting through Interface would copy it too early.
+func reflectValueUnaddressable(obj reflect.Value) reflect.Value {
+	// Go 1.26 reflect/value.go: flagAddr is bit 8; keep flagIndir so obj
+	// continues to refer to its typed allocation, including nil interfaces.
+	flag := reflect.ValueOf(&obj).Elem().FieldByName("flag")
+	reflectValueRWAddr(flag).Elem().SetUint(flag.Uint() &^ (1 << 8))
+	return obj
+}
+
 // reflectValueRWSlice3 is equivalent to arr.Slice3(i, j, k), except that the
 // returned reflect.Value is usable in assignments even if obj was obtained by
 // the use of unexported struct fields.

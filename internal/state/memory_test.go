@@ -37,7 +37,9 @@ func objectExamples() []object {
 		&interfaceValue{Type: &pointerType{Type: &sliceType{Type: &mapType{Key: typeSpecID(1), Value: typeSpecID(2)}}}, Value: &refValue{Root: 3}},
 		&typeDescriptor{Name: "test.Node", Fields: []string{"Value", "Next"}},
 		&functionValue{}, &functionValue{PC: 0x520000, Env: refValue{Root: 2}},
-		&interfaceValue{Type: nativeType(0x600000), Value: intValue(1)},
+		&reflectedValue{Type: nilType{}, Value: nilValue{}},
+		&reflectedValue{Type: typeSpecID(1), Value: intValue(42)},
+		&reflectedValue{Type: &pointerType{Type: typeSpecID(1)}, Value: &refValue{Root: 2}, Addressable: true},
 		&refValue{Root: 3, Dots: []dot{&f}, Type: closureType(0x520000)},
 	}
 }

@@ -679,6 +679,24 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 	if obj.CanAddr() && !obj.CanInterface() {
 		obj = reflectValueRWAddr(obj).Elem()
 	}
+	if obj.Type() == reflect.TypeFor[reflect.Value]() {
+		value := obj.Interface().(reflect.Value)
+		encoded := &reflectedValue{Type: nilType{}, Value: nilValue{}}
+		*dest = encoded
+		if !value.IsValid() {
+			return
+		}
+		if !value.CanInterface() {
+			Failf("reflect.Value has restricted access")
+		}
+		encoded.Addressable = value.CanAddr()
+		if encoded.Addressable {
+			value = value.Addr()
+		}
+		encoded.Type = es.findType(value.Type())
+		es.encodeObject(value, encodeAsValue, &encoded.Value)
+		return
+	}
 	if obj.Kind() != reflect.Interface && obj.CanInterface() {
 		if typ, ok := obj.Interface().(reflect.Type); ok {
 			*dest = &reflectTypeValue{Type: es.findType(typ)}

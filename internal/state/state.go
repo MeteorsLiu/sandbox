@@ -36,7 +36,7 @@
 //	Complex128       default
 //	Array            default
 //	Chan             custom
-//	Func             native PC and capture DWARF (Linux amd64/arm64)
+//	Func             native PC and ELF capture layout (Linux amd64/arm64)
 //	Interface        default
 //	Map              default
 //	Ptr              default
@@ -91,8 +91,12 @@ func (e *ErrState) Unwrap() error {
 // The stream starts with a reflect type table, followed by the object graph.
 // Standard reflected types and represented reflect.Type values are supported;
 // reconstructing a type does not add support for values such as live channels.
-// Native functions require the same non-PIE Go executable, with capture DWARF,
-// on both ends. Captured objects are saved; package globals are not captured.
+// reflect.Value preserves its represented type, value and addressability.
+// Values obtained through unexported fields are rejected; their access flags
+// are not transferred. The represented value must itself be supported by Save.
+// Native functions require the same non-PIE Go executable with ELF symbols on
+// both ends. Closure allocation instructions identify the environment type.
+// Missing layouts are rejected. Captured objects are saved; globals are not.
 func Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
 	// Create the encoding state.
 	es := encodeState{
