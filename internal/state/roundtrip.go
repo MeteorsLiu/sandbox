@@ -5,6 +5,62 @@ import (
 	"reflect"
 )
 
+// State retains object identities across alternating Save and Load calls.
+// The zero value is ready for use. Each participant owns its own State and
+// keeps it alive until the round trip finishes, including unlinked objects.
+// Calls on one State must not overlap, and the root's storage must not change.
+type State struct {
+	saved  *encodeState
+	loaded *decodeState
+}
+
+// Save writes the graph, preserving IDs from the preceding Load when present.
+func (s *State) Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
+	es := newEncodeState(ctx, mem)
+	err := safely(func() {
+		if s.loaded != nil {
+			es = s.loaded.encoder(ctx, mem)
+		}
+		es.Save(reflect.ValueOf(rootPtr).Elem())
+	})
+	if err == nil {
+		s.saved, s.loaded = es, nil
+	}
+	return es.w.pos, es.stats, err
+}
+
+// Load restores the graph into objects retained by the preceding Save.
+// Before overwriting those objects, it decodes into independent storage so
+// structural errors in returned records are detected before writeback.
+// Custom StateLoad/AfterLoad hooks run in both passes and must be deterministic
+// and confined to their decoded graph. Their external side effects cannot be
+// rolled back, and a hook that fails only during writeback can partially apply.
+func (s *State) Load(ctx context.Context, mem []byte, rootPtr any) (Stats, error) {
+	ds := newDecodeState(ctx, mem)
+	err := safely(func() {
+		if s.saved != nil {
+			check := newDecodeState(ctx, mem)
+			check.native = s.saved.native
+			for id, saved := range s.saved.pending {
+				value := reflect.New(saved.obj.Type()).Elem()
+				if saved.how == encodeMapAsValue {
+					value.Set(reflect.MakeMap(value.Type()))
+				} else if saved.how == encodeChannelAsValue {
+					value.Set(reflect.MakeChan(value.Type(), saved.obj.Cap()))
+				}
+				check.addObject(id, value).how = saved.how
+			}
+			check.Load(check.lookup(1).obj)
+			ds = s.saved.decoder(ctx, mem)
+		}
+		ds.Load(reflect.ValueOf(rootPtr).Elem())
+	})
+	if err == nil {
+		s.loaded, s.saved = ds, nil
+	}
+	return ds.stats, err
+}
+
 // decoder reuses the objects from this save when loading its returned graph.
 // Keeping es alive retains even objects the guest later unlinks from the root.
 // No source address is written to the stream; both sides use the existing IDs.

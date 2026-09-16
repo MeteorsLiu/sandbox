@@ -3,11 +3,13 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"os"
 	"runtime"
 
+	"github.com/xgo-dev/sandbox/internal/state"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,10 +30,6 @@ func runGuest() (err error) {
 			err = fmt.Errorf("sandbox guest panicked: %v", value)
 		}
 	}()
-	m, err := loadMetadata()
-	if err != nil {
-		return err
-	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(3, &stat); err != nil {
 		return err
@@ -45,26 +43,22 @@ func runGuest() (err error) {
 	}
 	defer unix.Munmap(mem)
 	defer unix.Close(3)
-	functions := make(map[uintptr]nativeLayout)
-	in := newImage(append([]byte(nil), mem[:imageBytes]...), m, functions)
-	if err := in.prepare(nil); err != nil {
-		return err
-	}
-	bindings, err := in.globalBindings()
+	data, err := stateImage(append([]byte(nil), mem[:imageBytes]...))
 	if err != nil {
 		return err
 	}
-	fn, retained, err := in.decode(bindings)
+	var graph state.State
+	var fn func()
+	ctx := context.Background()
+	if _, err := graph.Load(ctx, data, &fn); err != nil {
+		return err
+	}
+	fn()
+	n, _, err := graph.Save(ctx, mem[imageBytes+8:], &fn)
 	if err != nil {
 		return err
 	}
-	fn.Interface().(func())()
-	out := newImage(mem[imageBytes:], m, functions)
-	out.inherit(in)
-	if _, err := out.encode(fn, retained); err != nil {
-		return err
-	}
-	binary.LittleEndian.PutUint64(mem[imageBytes+48:], 1)
-	runtime.KeepAlive(retained)
+	binary.LittleEndian.PutUint64(mem[imageBytes:], uint64(n))
+	runtime.KeepAlive(&graph)
 	return nil
 }

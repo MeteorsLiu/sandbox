@@ -115,12 +115,11 @@ func (e *ErrState) Unwrap() error {
 // Missing layouts are rejected. Captured objects are saved; globals are not.
 // MakeFunc wrappers are rebuilt from the function type and saved callback;
 // the callback and everything it captures must also be supported by Save.
+// Standard stream references rebind to the local os.Stdin/Stdout/Stderr.
+// Other files, OS processes, timers and cancellation contexts are rejected.
 func Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
-	es := newEncodeState(ctx, mem)
-	err := safely(func() {
-		es.Save(reflect.ValueOf(rootPtr).Elem())
-	})
-	return es.w.pos, es.stats, err
+	var s State
+	return s.Save(ctx, mem, rootPtr)
 }
 
 func newEncodeState(ctx context.Context, mem []byte) *encodeState {
@@ -136,11 +135,8 @@ func newEncodeState(ctx context.Context, mem []byte) *encodeState {
 
 // Load restores an object graph from the bytes written by Save.
 func Load(ctx context.Context, mem []byte, rootPtr any) (Stats, error) {
-	ds := newDecodeState(ctx, mem)
-	err := safely(func() {
-		ds.Load(reflect.ValueOf(rootPtr).Elem())
-	})
-	return ds.stats, err
+	var s State
+	return s.Load(ctx, mem, rootPtr)
 }
 
 func newDecodeState(ctx context.Context, mem []byte) *decodeState {

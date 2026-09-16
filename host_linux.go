@@ -10,6 +10,7 @@ package sandbox
 import "C"
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -18,9 +19,11 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/cgo"
+	"strings"
 	"sync"
 	"unsafe"
 
+	"github.com/xgo-dev/sandbox/internal/state"
 	"golang.org/x/sys/unix"
 )
 
@@ -77,10 +80,6 @@ func sandboxInspect(owner C.uintptr_t, event *C.struct_syscall_event) {
 	}
 }
 
-func headerWord(mem []byte, offset int) uintptr {
-	return uintptr(binary.LittleEndian.Uint64(mem[offset : offset+8]))
-}
-
 // Run executes fn in a fresh guest running the same ELF. The guest enters the
 // closure automatically after package initialization, without running main.
 // Capture mutations are committed only after a successful guest exit.
@@ -97,16 +96,9 @@ func (s *Sandbox) Run(fn func()) error {
 	if !validRseqSetting(os.Getenv("GLIBC_TUNABLES")) {
 		return fmt.Errorf("sandbox: start the process with GLIBC_TUNABLES=glibc.pthread.rseq=0")
 	}
-	m, err := loadMetadata()
+	mainPC, err := guestMain()
 	if err != nil {
 		return err
-	}
-	jumpSize := uint64(4)
-	if runtime.GOARCH == "amd64" {
-		jumpSize = 5
-	}
-	if m.mainPC == 0 || m.mainSize < jumpSize {
-		return fmt.Errorf("sandbox needs a main.main ELF symbol with at least %d bytes", jumpSize)
 	}
 	entryPC := reflect.ValueOf(guestEntry).Pointer()
 	fd, err := unix.MemfdCreate("llar-sandbox", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
@@ -125,13 +117,14 @@ func (s *Sandbox) Run(fn func()) error {
 		return err
 	}
 	defer unix.Munmap(mem)
-	functions := make(map[uintptr]nativeLayout)
-	in := newImage(mem[:imageBytes], m, functions)
-	w, err := in.encode(reflect.ValueOf(fn), nil)
+	var graph state.State
+	ctx := context.Background()
+	n, _, err := graph.Save(ctx, mem[8:imageBytes], &fn)
 	if err != nil {
 		return fmt.Errorf("sandbox export: %w", err)
 	}
-	defer runtime.KeepAlive(w)
+	binary.LittleEndian.PutUint64(mem, uint64(n))
+	defer runtime.KeepAlive(&graph)
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -172,7 +165,7 @@ func (s *Sandbox) Run(fn func()) error {
 		defer handle.Delete()
 	}
 	var message [4096]C.char
-	code := C.sandbox_load(cLibrary, cConfig, C.int(fd), C.uintptr_t(m.mainPC), C.uintptr_t(entryPC), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
+	code := C.sandbox_load(cLibrary, cConfig, C.int(fd), C.uintptr_t(mainPC), C.uintptr_t(entryPC), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
 	if code != 0 {
 		return fmt.Errorf("sandbox Sentry: %s", C.GoString(&message[0]))
 	}
@@ -184,15 +177,21 @@ func (s *Sandbox) Run(fn func()) error {
 	}
 	// Never parse guest-writable memory while changing host objects.
 	output := append([]byte(nil), mem[imageBytes:]...)
-	if headerWord(output, 48) != 1 {
-		return fmt.Errorf("sandbox guest did not publish a completed result")
+	data, err := stateImage(output)
+	if err != nil {
+		return fmt.Errorf("sandbox result: %w", err)
 	}
-	out := newImage(output, m, functions)
-	if err := out.prepare(in); err != nil {
-		return fmt.Errorf("sandbox import metadata: %w", err)
-	}
-	if err := out.commit(w.anchors); err != nil {
+	if _, err := graph.Load(ctx, data, &fn); err != nil {
 		return fmt.Errorf("sandbox import: %w", err)
 	}
 	return nil
+}
+
+func validRseqSetting(value string) bool {
+	for _, setting := range strings.Split(value, ":") {
+		if strings.HasPrefix(setting, "glibc.pthread.rseq=") {
+			return setting == "glibc.pthread.rseq=0"
+		}
+	}
+	return false
 }

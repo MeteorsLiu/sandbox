@@ -139,14 +139,20 @@ func run() error {
 	fmt.Println("PASS syscall number rewrite and nested Run rejection")
 
 	var mu sync.Mutex
-	if err := s.Run(func() { mu.Lock(); mu.Unlock() }); err == nil {
-		return fmt.Errorf("sync.Mutex was accepted")
+	if err := s.Run(func() { mu.Lock(); mu.Unlock() }); err != nil {
+		return fmt.Errorf("sync.Mutex reset: %w", err)
 	}
-	ch := make(chan int)
-	if err := s.Run(func() { close(ch) }); err == nil {
-		return fmt.Errorf("channel was accepted")
+	queue := &struct{ C chan int }{make(chan int, 2)}
+	queue.C <- 7
+	original := queue.C
+	if err := s.Run(func() { value := <-queue.C; queue.C <- value + 1; close(queue.C) }); err != nil {
+		return fmt.Errorf("channel snapshot: %w", err)
 	}
-	fmt.Println("PASS unsupported synchronization values rejected")
+	value, ok := <-queue.C
+	check(ok && value == 8 && queue.C != original, "returned channel snapshot")
+	_, ok = <-queue.C
+	check(!ok && <-original == 7, "channel closed state/host isolation")
+	fmt.Println("PASS reset synchronization values and independent channel snapshot")
 
 	var stdinBefore, stdinAfter unix.Stat_t
 	if err := unix.Fstat(0, &stdinBefore); err != nil {

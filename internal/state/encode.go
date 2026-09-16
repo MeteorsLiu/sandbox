@@ -17,6 +17,7 @@ package state
 
 import (
 	"context"
+	"os"
 	"reflect"
 	"sort"
 	"unsafe"
@@ -748,8 +749,18 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 		*dest = nilValue{}
 		return
 	}
+	checkProcessResource(obj.Type())
 	switch obj.Kind() {
 	case reflect.Ptr: // Fast path: first.
+		if obj.Type() == reflect.TypeFor[*os.File]() && !obj.IsNil() {
+			for i, stream := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
+				if stream != nil && obj.Interface().(*os.File) == stream && stream.Fd() == uintptr(i) {
+					*dest = uintValue(i + 1)
+					return
+				}
+			}
+			Failf("%v contains process-local state", obj.Type())
+		}
 		r := new(refValue)
 		*dest = r
 		if obj.IsNil() {

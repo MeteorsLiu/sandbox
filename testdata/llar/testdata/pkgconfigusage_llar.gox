@@ -1,0 +1,48 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+id "test/pkgconfig"
+
+fromVer "v1.0.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	dep := pkgconfig.new(
+		name = "llar-formula-pkgconfig-dependency",
+		description = "Formula pkgconfig dependency",
+		version = "1.0.0",
+	)!
+	depOut := os.create(filepath.join(pcDir, "llar-formula-pkgconfig-dependency.pc"))!
+	dep.writeTo(depOut)!
+	depOut.close()!
+
+	pc := pkgconfig.new(
+		name = "llar-formula-pkgconfig-test",
+		description = "Formula pkgconfig auto-import test",
+		version = "1.0.0",
+		requires = ["llar-formula-pkgconfig-dependency >= 1.0.0"],
+		libs = ["-L$${libdir}", "-lllar_formula_pkgconfig_test"],
+		cflags = ["-I$${includedir}", "-DLLAR_FORMULA_PKGCONFIG_TEST"],
+	)!
+	pc.libs.private ["-lm"]
+	pc.libs.shared ["-lllar_formula_shared"]
+	pc.cflags.private ["-DLLAR_FORMULA_STATIC"]
+	pc.cflags.shared ["-DLLAR_FORMULA_SHARED"]
+	if "${pc.libs}" != "-L$${libdir} -lllar_formula_pkgconfig_test" {
+		panic "unexpected public Libs fragments"
+	}
+	if "${pc.cflags}" != "-I$${includedir} -DLLAR_FORMULA_PKGCONFIG_TEST" {
+		panic "unexpected public Cflags fragments"
+	}
+
+	out := os.create(filepath.join(pcDir, "llar-formula-pkgconfig-test.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("llar-formula-pkgconfig-test")!
+}

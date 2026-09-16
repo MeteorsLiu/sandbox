@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"reflect"
 
 	"github.com/visualfc/xtype"
@@ -569,6 +570,7 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 	if obj.CanAddr() && !obj.CanSet() {
 		obj = reflectValueRWAddr(obj).Elem()
 	}
+	checkProcessResource(obj.Type())
 	switch x := encoded.(type) {
 	case nilValue: // Fast path: first.
 		obj.SetZero()
@@ -605,6 +607,18 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 			Failf("signed integer truncated from %v to %v", int64(x), obj.Int())
 		}
 	case uintValue:
+		if obj.Type() == reflect.TypeFor[*os.File]() {
+			if x == 0 {
+				obj.SetZero()
+				return
+			}
+			streams := []*os.File{os.Stdin, os.Stdout, os.Stderr}
+			if uint64(x) > uint64(len(streams)) {
+				Failf("invalid standard stream %d", x)
+			}
+			obj.Set(reflect.ValueOf(streams[int(x)-1]))
+			return
+		}
 		obj.SetUint(uint64(x))
 		if obj.Uint() != uint64(x) {
 			Failf("unsigned integer truncated from %v to %v", uint64(x), obj.Uint())

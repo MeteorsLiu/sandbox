@@ -1,0 +1,31 @@
+import "os"
+import "syscall"
+
+id "test/env"
+
+fromVer "v1.0.0"
+
+onBuild ctx => {
+	echo os.getenv("FORMULA_ENV_TEST")
+	value, ok := os.lookupEnv("FORMULA_ENV_TEST")
+	echo value
+	echo ok
+	os.setenv("FORMULA_ENV_TEST", "formula")!
+	echo "${FORMULA_ENV_TEST}"
+	echo os.expandEnv("$FORMULA_ENV_TEST")
+	for _, entry := range os.environ() {
+		if entry == "FORMULA_ENV_TEST=formula" {
+			echo "environment"
+		}
+	}
+	syscall.setenv("FORMULA_ENV_TEST", "syscall")!
+	value, ok = syscall.getenv("FORMULA_ENV_TEST")
+	echo value
+	echo ok
+	os.unsetenv("FORMULA_ENV_TEST")!
+	echo os.getenv("FORMULA_ENV_TEST")
+	os.clearenv()
+	echo os.getenv("FORMULA_ENV_TEST")
+	os.setenv("FORMULA_ENV_TEST", "formula-again")!
+	echo os.getenv("FORMULA_ENV_TEST")
+}
