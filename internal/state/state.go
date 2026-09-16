@@ -116,8 +116,15 @@ func (e *ErrState) Unwrap() error {
 // MakeFunc wrappers are rebuilt from the function type and saved callback;
 // the callback and everything it captures must also be supported by Save.
 func Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
-	// Create the encoding state.
-	es := encodeState{
+	es := newEncodeState(ctx, mem)
+	err := safely(func() {
+		es.Save(reflect.ValueOf(rootPtr).Elem())
+	})
+	return es.w.pos, es.stats, err
+}
+
+func newEncodeState(ctx context.Context, mem []byte) *encodeState {
+	return &encodeState{
 		ctx:            ctx,
 		w:              writer{mem: mem},
 		types:          makeTypeEncodeDatabase(),
@@ -125,29 +132,24 @@ func Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
 		pending:        make(map[objectID]*objectEncodeState),
 		encodedStructs: make(map[reflect.Value]*structValue),
 	}
-
-	// Perform the encoding.
-	err := safely(func() {
-		es.Save(reflect.ValueOf(rootPtr).Elem())
-	})
-	return es.w.pos, es.stats, err
 }
 
 // Load restores an object graph from the bytes written by Save.
 func Load(ctx context.Context, mem []byte, rootPtr any) (Stats, error) {
-	// Create the decoding state.
-	ds := decodeState{
+	ds := newDecodeState(ctx, mem)
+	err := safely(func() {
+		ds.Load(reflect.ValueOf(rootPtr).Elem())
+	})
+	return ds.stats, err
+}
+
+func newDecodeState(ctx context.Context, mem []byte) *decodeState {
+	return &decodeState{
 		ctx:      ctx,
 		r:        reader{mem: mem},
 		types:    makeTypeDecodeDatabase(),
 		deferred: make(map[objectID]object),
 	}
-
-	// Attempt our decode.
-	err := safely(func() {
-		ds.Load(reflect.ValueOf(rootPtr).Elem())
-	})
-	return ds.stats, err
 }
 
 // Sink is used for Type.StateSave.

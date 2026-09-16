@@ -47,6 +47,9 @@ type objectEncodeState struct {
 	// is used only for deferred encoding.
 	how encodeStrategy
 
+	// retained objects already have an identity in the other process.
+	retained bool
+
 	// refs are the list of reference objects used by other objects
 	// referring to this object. When the object is updated, these
 	// references may be updated directly and automatically.
@@ -220,6 +223,10 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 		}
 
 		// Record the handle's contents once, independently of its aliases.
+		// Keep the handle itself, not the variable slot: m = nil must not
+		// discard the original map before its contents are written back.
+		value := reflect.New(obj.Type()).Elem()
+		value.Set(obj)
 		how := encodeMapAsValue
 		if obj.Kind() == reflect.Chan {
 			how = encodeChannelAsValue
@@ -227,7 +234,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 		r := addrRange{addr, addr + 1}
 		oes := &objectEncodeState{
 			id:  es.nextID(),
-			obj: obj,
+			obj: value,
 			how: how,
 		}
 		// Use Insert instead of InsertWithoutMergingUnchecked when race
@@ -319,6 +326,11 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 
 		// This object contains one or more previously-registered objects.
 		// Remove them and update existing references to use the new one.
+		for overlap := seg; overlap.Ok() && overlap.Start() < end; overlap = overlap.NextSegment() {
+			if overlap.Value().retained {
+				Failf("object %d cannot change retained storage from %v to %v", overlap.Value().id, overlap.Value().obj.Type(), typ)
+			}
+		}
 		oes := &objectEncodeState{
 			// Reuse the root ID of the first contained element.
 			id:  existing.id,

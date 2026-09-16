@@ -95,6 +95,7 @@ func (es *encodeState) encodeChannel(obj reflect.Value, dest *object) {
 
 func (ds *decodeState) decodeChannelRef(obj reflect.Value, encoded *channelValue) {
 	if encoded.Ref.Root == 0 {
+		obj.SetZero()
 		return
 	}
 	if obj.Kind() != reflect.Chan || len(encoded.Ref.Dots) != 0 || uint64(encoded.Capacity) > uint64(^uint(0)>>1) {
@@ -108,6 +109,7 @@ func (ds *decodeState) decodeChannelRef(obj reflect.Value, encoded *channelValue
 		value := reflect.New(typ).Elem()
 		value.Set(reflect.MakeChan(typ, int(encoded.Capacity)))
 		ods = ds.addObject(id, value)
+		ods.how = encodeChannelAsValue
 		if data, ok := ds.deferred[id]; ok {
 			delete(ds.deferred, id)
 			ds.decodeObject(ods, value, data)

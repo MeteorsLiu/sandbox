@@ -78,6 +78,9 @@ type objectDecodeState struct {
 	// distinct types.
 	obj reflect.Value
 
+	// how distinguishes handle contents from an addressable variable slot.
+	how encodeStrategy
+
 	// blockedBy is the number of dependencies this object has.
 	blockedBy int
 
@@ -442,6 +445,8 @@ func (ds *decodeState) decodeMap(ods *objectDecodeState, obj reflect.Value, enco
 	if obj.IsNil() {
 		// See pointerTo.
 		obj.Set(reflect.MakeMap(obj.Type()))
+	} else {
+		obj.Clear()
 	}
 	for i := 0; i < len(encoded.Keys); i++ {
 		// Decode the objects.
@@ -566,14 +571,10 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 	}
 	switch x := encoded.(type) {
 	case nilValue: // Fast path: first.
-		// We leave obj alone here. That's because if obj represents an
-		// interface, it may have been imbued with type information in
-		// decodeInterface, and we don't want to destroy that.
+		obj.SetZero()
 	case *refValue:
-		// Nil pointers may be encoded in a "forceValue" context. For
-		// those we just leave it alone as the value will already be
-		// correct (nil).
 		if id := objectID(x.Root); id == 0 {
+			obj.SetZero()
 			return
 		}
 
@@ -581,6 +582,7 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		// indirection to allow for map aliasing.
 		if obj.Kind() == reflect.Map {
 			v := ds.register(x, obj.Type())
+			ds.lookup(objectID(x.Root)).how = encodeMapAsValue
 			if v.IsNil() {
 				// Note that we don't want to clobber the map
 				// if has already been decoded by decodeMap. We
@@ -624,8 +626,8 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 	case *stringValue:
 		obj.SetString(string(*x))
 	case *sliceValue:
-		// See *refValue above; same applies.
 		if id := objectID(x.Ref.Root); id == 0 {
+			obj.SetZero()
 			return
 		}
 		// Note that it's fine to slice the array here and assume that
@@ -733,8 +735,12 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		}
 	}
 
-	// Add the root object with ID 1.
-	_ = ds.addObject(1, obj)
+	// A returning graph already has local storage for the original IDs.
+	if root := ds.lookup(1); root == nil {
+		ds.addObject(1, obj)
+	} else if root.obj.Type() != obj.Type() || root.obj.Addr().Pointer() != obj.Addr().Pointer() {
+		Failf("root object changed during round trip")
+	}
 
 	// Read the number of objects.
 	numObjects, isObject, err := readHeader(&ds.r)
