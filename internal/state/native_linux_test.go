@@ -319,10 +319,3 @@ func TestNativeInvalidPC(t *testing.T) {
 		t.Fatalf("invalid PC: %v", err)
 	}
 }
-
-func TestNativeRejectReflectFunction(t *testing.T) {
-	src := reflect.MakeFunc(reflect.TypeFor[func()](), func([]reflect.Value) []reflect.Value { return nil }).Interface().(func())
-	if _, _, err := Save(context.Background(), make([]byte, 4096), &src); err == nil {
-		t.Fatal("accepted reflect.MakeFunc without a native capture layout")
-	}
-}

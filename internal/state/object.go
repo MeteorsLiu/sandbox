@@ -327,8 +327,40 @@ type sliceValue struct {
 	Ref      refValue
 }
 
+// Capacity travels with the reference so every alias can immediately use the
+// final channel, even when its queued values have not been decoded yet.
+type channelValue struct {
+	Capacity uintValue
+	Ref      refValue
+}
+
+func (c *channelValue) save(w *writer) {
+	c.Capacity.save(w)
+	c.Ref.save(w)
+}
+
+func (*channelValue) load(r *reader) object {
+	return &channelValue{Capacity: loadUint(r), Ref: loadRef(r)}
+}
+
+type channelData struct {
+	Closed boolValue
+	Values arrayValue
+}
+
+func (c *channelData) save(w *writer) {
+	c.Closed.save(w)
+	c.Values.save(w)
+}
+
+func (*channelData) load(r *reader) object {
+	return &channelData{Closed: loadBool(r), Values: loadArray(r)}
+}
+
 // functionValue identifies code in the same executable and the closure storage
 // in the object graph. Env references preserve shared and recursive closures.
+// For reflect.makeFuncStub, Env refers to the callback slot; the destination
+// function type supplies the signature used to rebuild the MakeFunc wrapper.
 type functionValue struct {
 	PC  uintValue
 	Env refValue
@@ -848,6 +880,8 @@ const (
 	typeFunction
 	typeReflectType
 	typeReflectValue
+	typeChannel
+	typeChannelData
 )
 
 // saveObject saves the given object.
@@ -920,6 +954,12 @@ func saveObject(w *writer, obj object) {
 	case *reflectedValue:
 		typeReflectValue.save(w)
 		x.save(w)
+	case *channelValue:
+		typeChannel.save(w)
+		x.save(w)
+	case *channelData:
+		typeChannelData.save(w)
+		x.save(w)
 	default:
 		panic(fmt.Errorf("unknown type: %#v", obj))
 	}
@@ -974,6 +1014,10 @@ func loadObject(r *reader) object {
 		return ((*reflectTypeValue)(nil)).load(r)
 	case typeReflectValue:
 		return ((*reflectedValue)(nil)).load(r)
+	case typeChannel:
+		return ((*channelValue)(nil)).load(r)
+	case typeChannelData:
+		return ((*channelData)(nil)).load(r)
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr))

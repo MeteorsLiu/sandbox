@@ -163,6 +163,7 @@ type decodeState struct {
 
 	native    nativeState
 	functions []decodedFunction
+	makeFuncs map[reflect.Value]reflect.Value // Callback slots to MakeFunc wrappers.
 
 	// objectByID is the set of objects in progress.
 	objectsByID []*objectDecodeState
@@ -259,6 +260,8 @@ func (ds *decodeState) waitObject(ods *objectDecodeState, encoded object, callba
 	} else if sv, ok := encoded.(*sliceValue); ok && sv.Ref.Root != 0 {
 		// See decodeObject; we need to wait for the array (if non-nil).
 		ds.wait(ods, objectID(sv.Ref.Root), callback)
+	} else if cv, ok := encoded.(*channelValue); ok && cv.Ref.Root != 0 {
+		ds.wait(ods, objectID(cv.Ref.Root), callback)
 	} else if iv, ok := encoded.(*interfaceValue); ok {
 		// It's an interface (wait recursively).
 		ds.waitObject(ods, iv.Value, callback)
@@ -610,6 +613,10 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		ds.decodeStruct(ods, obj, x)
 	case *mapValue:
 		ds.decodeMap(ods, obj, x)
+	case *channelValue:
+		ds.decodeChannelRef(obj, x)
+	case *channelData:
+		ds.decodeChannel(ods, obj, x)
 	case *interfaceValue:
 		ds.decodeInterface(ods, obj, x)
 	case *functionValue:
@@ -770,6 +777,9 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		if f.storage.Field(0).Uint() != uint64(f.pc) {
 			Failf("closure storage does not match PC %#x", f.pc)
 		}
+	}
+	for callback, fn := range ds.makeFuncs {
+		makeFuncCallback(fn).Set(callback)
 	}
 
 	// Scan and fire all callbacks. We iterate over the list of incomplete

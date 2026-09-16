@@ -190,9 +190,8 @@ var dummyAddr = reflect.ValueOf(new(struct{})).Pointer()
 func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 	addr := obj.Pointer()
 
-	// Is this a map pointer? Just record the single address. It is not
-	// possible to take any pointers into the map internals.
-	if obj.Kind() == reflect.Map {
+	// Maps and channels expose handles, not pointers into their storage.
+	if obj.Kind() == reflect.Map || obj.Kind() == reflect.Chan {
 		if addr == 0 {
 			// Just leave the nil reference alone. This is fine, we
 			// may need to encode as a reference in this way. We
@@ -202,24 +201,31 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 		}
 		seg, gap := es.values.Find(addr)
 		if seg.Ok() {
-			// Ensure the map types match.
+			// Channel aliases can have different names and directions.
 			existing := seg.Value()
-			if existing.obj.Type() != obj.Type() {
-				Failf("overlapping map objects at 0x%x: [new object] %#v [existing object type] %s", addr, obj, existing.obj)
+			compatible := existing.obj.Type() == obj.Type()
+			if obj.Kind() == reflect.Chan && existing.obj.Kind() == reflect.Chan {
+				compatible = existing.obj.Type().Elem() == obj.Type().Elem()
+			}
+			if !compatible {
+				Failf("overlapping handle objects at 0x%x: %v and %v", addr, obj.Type(), existing.obj.Type())
 			}
 
-			// No sense recording refs, maps may not be replaced by
-			// covering objects, they are maximal.
+			// Handles cannot be replaced by covering objects.
 			ref.Root = uintValue(existing.id)
 			return
 		}
 
-		// Record the map.
+		// Record the handle's contents once, independently of its aliases.
+		how := encodeMapAsValue
+		if obj.Kind() == reflect.Chan {
+			how = encodeChannelAsValue
+		}
 		r := addrRange{addr, addr + 1}
 		oes := &objectEncodeState{
 			id:  es.nextID(),
 			obj: obj,
-			how: encodeMapAsValue,
+			how: how,
 		}
 		// Use Insert instead of InsertWithoutMergingUnchecked when race
 		// detection is enabled to get additional sanity-checking from Merge.
@@ -236,9 +242,9 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 		return
 	}
 
-	// If not a map, then the object must be a pointer.
+	// Other objects must be pointers.
 	if obj.Kind() != reflect.Ptr {
-		Failf("attempt to record non-map and non-pointer object %#v", obj)
+		Failf("attempt to record non-handle and non-pointer object %#v", obj)
 	}
 
 	obj = obj.Elem() // Value from here.
@@ -615,7 +621,7 @@ func (es *encodeState) encodeInterface(obj reflect.Value, dest *object) {
 // object composed entirely of primitives.
 func isPrimitiveZero(typ reflect.Type) bool {
 	switch typ.Kind() {
-	case reflect.Func:
+	case reflect.Func, reflect.Chan:
 		return true
 	case reflect.Ptr:
 		// Pointers are always treated as primitive types because we
@@ -672,6 +678,8 @@ const (
 
 	// encodeMapAsValue means that even maps will be fully encoded.
 	encodeMapAsValue
+
+	encodeChannelAsValue
 )
 
 // encodeObject encodes an object.
@@ -769,6 +777,14 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 		es.resolve(obj, r)
 	case reflect.Func:
 		es.encodeFunction(obj, dest)
+	case reflect.Chan:
+		if how == encodeChannelAsValue {
+			es.encodeChannel(obj, dest)
+			return
+		}
+		c := &channelValue{Capacity: uintValue(obj.Cap())}
+		*dest = c
+		es.resolve(obj, &c.Ref)
 	default:
 		Failf("unknown object %#v", obj.Interface())
 		panic("unreachable")

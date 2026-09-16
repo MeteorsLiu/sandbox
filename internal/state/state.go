@@ -35,8 +35,8 @@
 //	Complex64        default
 //	Complex128       default
 //	Array            default
-//	Chan             custom
-//	Func             native PC and ELF capture layout (Linux amd64/arm64)
+//	Chan             independent queue snapshot (Go 1.26.6)
+//	Func             native PC/ELF capture layout and MakeFunc (Linux amd64/arm64)
 //	Interface        default
 //	Map              default
 //	Ptr              default
@@ -89,14 +89,19 @@ func (e *ErrState) Unwrap() error {
 // Save writes the object graph to mem and returns the number of bytes written.
 // The caller owns mem; Save does not allocate a replacement when it is full.
 // The stream starts with a reflect type table, followed by the object graph.
-// Standard reflected types and represented reflect.Type values are supported;
-// reconstructing a type does not add support for values such as live channels.
+// Standard reflected types and represented reflect.Type values are supported.
+// Channels preserve capacity, FIFO values, closed state and aliases in the new
+// graph. Waiting goroutines, runtime-attached timers and synctest channels are
+// rejected. Legacy timer modes without a channel timer link cannot be detected.
+// The caller must keep the source graph quiescent throughout Save.
 // reflect.Value preserves its represented type, value and addressability.
 // Values obtained through unexported fields are rejected; their access flags
 // are not transferred. The represented value must itself be supported by Save.
 // Native functions require the same non-PIE Go executable with ELF symbols on
 // both ends. Closure allocation instructions identify the environment type.
 // Missing layouts are rejected. Captured objects are saved; globals are not.
+// MakeFunc wrappers are rebuilt from the function type and saved callback;
+// the callback and everything it captures must also be supported by Save.
 func Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
 	// Create the encoding state.
 	es := encodeState{

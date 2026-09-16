@@ -37,6 +37,8 @@ func objectExamples() []object {
 		&interfaceValue{Type: &pointerType{Type: &sliceType{Type: &mapType{Key: typeSpecID(1), Value: typeSpecID(2)}}}, Value: &refValue{Root: 3}},
 		&typeDescriptor{Name: "test.Node", Fields: []string{"Value", "Next"}},
 		&functionValue{}, &functionValue{PC: 0x520000, Env: refValue{Root: 2}},
+		&channelValue{}, &channelValue{Capacity: 3, Ref: refValue{Root: 2}},
+		&channelData{}, &channelData{Closed: true, Values: arrayValue{Contents: []object{intValue(10), intValue(20)}}},
 		&reflectedValue{Type: nilType{}, Value: nilValue{}},
 		&reflectedValue{Type: typeSpecID(1), Value: intValue(42)},
 		&reflectedValue{Type: &pointerType{Type: typeSpecID(1)}, Value: &refValue{Root: 2}, Addressable: true},
