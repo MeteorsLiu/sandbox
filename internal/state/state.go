@@ -94,6 +94,10 @@ func (e *ErrState) Unwrap() error {
 // graph. Waiting goroutines, runtime-attached timers and synctest channels are
 // rejected. Legacy timer modes without a channel timer link cannot be detected.
 // The caller must keep the source graph quiescent throughout Save.
+// Atomic wrappers preserve their values; atomic.Pointer[T] targets are relocated
+// with the object graph. Structs from sync except sync.Map are not traversed:
+// they become zero values, including Once's done flag, WaitGroup's counter,
+// Cond.L and Pool.New. Their waiters and synchronization state are not copied.
 // reflect.Value preserves its represented type, value and addressability.
 // Values obtained through unexported fields are rejected; their access flags
 // are not transferred. The represented value must itself be supported by Save.

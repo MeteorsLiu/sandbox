@@ -497,6 +497,13 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *object) {
 	s := &structValue{}
 	*dest = s
 	es.encodedStructs[obj] = s
+	if fields, ok := syncFields(obj); ok {
+		s.Alloc(len(fields))
+		for i, field := range fields {
+			es.encodeObject(field, encodeDefault, s.Field(i))
+		}
+		return
+	}
 
 	// Ensure that the obj is addressable. There are two cases when it is
 	// not. First, is when this is dispatched via SaveValue. Second, when
@@ -705,7 +712,7 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 		es.encodeObject(value, encodeAsValue, &encoded.Value)
 		return
 	}
-	if obj.Kind() != reflect.Interface && obj.CanInterface() {
+	if obj.Kind() != reflect.Interface && obj.CanInterface() && obj.Type().Implements(reflect.TypeFor[reflect.Type]()) {
 		if typ, ok := obj.Interface().(reflect.Type); ok {
 			*dest = &reflectTypeValue{Type: es.findType(typ)}
 			return
@@ -816,9 +823,9 @@ func (es *encodeState) Save(obj reflect.Value) {
 			es.encodeObject(oes.obj, oes.how, &oes.encoded)
 		}
 	}); err != nil {
-		// Include the object in the error message, if available.
+		// Report the type without copying live synchronization state.
 		if oes != nil && oes.obj.IsValid() {
-			Failf("encoding error: %w\nfor object %#v", err, oes.obj.Interface())
+			Failf("encoding error: %w\nfor object type %v", err, oes.obj.Type())
 		}
 		Failf("encoding error: %w", err)
 	}

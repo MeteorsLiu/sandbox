@@ -394,6 +394,16 @@ func (od *objectDecoder) afterLoad(fn func()) {
 
 // decodeStruct decodes a struct value.
 func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, encoded *structValue) {
+	if fields, ok := syncFields(obj); ok {
+		if encoded.TypeID != 0 || encoded.Fields() != len(fields) {
+			Failf("invalid synchronization value for %v", obj.Type())
+		}
+		obj.SetZero()
+		for i, field := range fields {
+			ds.decodeObject(ods, field, *encoded.Field(i))
+		}
+		return
+	}
 	if encoded.TypeID == 0 {
 		if encoded.Fields() != obj.NumField() {
 			Failf("struct field count %d does not match %v", encoded.Fields(), obj.Type())
