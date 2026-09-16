@@ -5,6 +5,7 @@ go 1.26.6
 require (
 	github.com/goplus/ixgo v1.1.6
 	github.com/visualfc/funcval v0.1.5
+	golang.org/x/arch v0.28.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/tools v0.49.0
 )
