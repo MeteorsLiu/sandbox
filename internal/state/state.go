@@ -102,7 +102,12 @@ func (e *ErrState) Unwrap() error {
 // Values obtained through unexported fields are rejected; their access flags
 // are not transferred. The represented value must itself be supported by Save.
 // Native functions require the same non-PIE Go executable with ELF symbols on
-// both ends. Closure allocation instructions identify the environment type.
+// both ends. Function values in the static descriptor range have no captures
+// and save only their PC with an empty environment reference. Load creates a
+// PC-only function value and caches its layout for subsequent saves. Closure
+// allocation instructions identify captured environment types.
+// Bound methods resolve their named receiver from the function symbol and
+// static type links, then save the receiver as the method value's environment.
 // Missing layouts are rejected. Captured objects are saved; globals are not.
 // MakeFunc wrappers are rebuilt from the function type and saved callback;
 // the callback and everything it captures must also be supported by Save.

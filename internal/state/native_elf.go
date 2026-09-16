@@ -2,7 +2,9 @@ package state
 
 import (
 	"debug/elf"
+	"encoding/binary"
 	"fmt"
+	"net/url"
 	"os"
 	"reflect"
 	"runtime"
@@ -15,9 +17,11 @@ type nativeMetadata struct {
 	path               string
 	machine            elf.Machine
 	typeStart, typeEnd uintptr
+	funcStart, funcEnd uintptr
 	newobject          uint64
 	functions          map[uintptr]elf.Symbol
 	names              map[string]elf.Symbol
+	receivers          map[string]reflect.Type
 	segments           []elf.ProgHeader
 
 	mu      sync.Mutex // Protects layouts and the set of already scanned factories.
@@ -54,8 +58,10 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 	m := &nativeMetadata{
 		path: path, machine: f.Machine,
 		functions: make(map[uintptr]elf.Symbol), names: make(map[string]elf.Symbol),
-		layouts: make(map[uintptr]reflect.Type), scanned: make(map[string]bool),
+		receivers: make(map[string]reflect.Type),
+		layouts:   make(map[uintptr]reflect.Type), scanned: make(map[string]bool),
 	}
+	var funcStart, funcEnd elf.Symbol
 	for _, s := range syms {
 		switch s.Name {
 		case "runtime.types":
@@ -64,6 +70,10 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 			m.typeEnd = uintptr(s.Value)
 		case "runtime.newobject":
 			m.newobject = s.Value
+		case "go:funcdesc":
+			funcStart = s
+		case "runtime.gcbits.*":
+			funcEnd = s
 		}
 		if elf.ST_TYPE(s.Info) == elf.STT_FUNC && s.Size != 0 {
 			m.functions[uintptr(s.Value)] = s
@@ -73,40 +83,105 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 	if m.typeStart == 0 || m.typeEnd <= m.typeStart || m.newobject == 0 {
 		return nil, fmt.Errorf("missing native closure ELF symbols")
 	}
+	// Go 1.26.6 WriteFuncSyms emits one PC per capture-free function value.
+	// The linker groups these under go:funcdesc, followed by runtime.gcbits.*.
+	// Keep only the range: a funcval inside it has no captured environment.
+	if funcStart.Section == elf.SHN_UNDEF || funcStart.Section != funcEnd.Section || int(funcStart.Section) >= len(f.Sections) || funcStart.Value > funcEnd.Value || (funcEnd.Value-funcStart.Value)%8 != 0 {
+		return nil, fmt.Errorf("invalid native function descriptor range")
+	}
+	funcSection := f.Sections[funcStart.Section]
+	if funcStart.Value < funcSection.Addr || funcEnd.Value-funcSection.Addr > funcSection.Size {
+		return nil, fmt.Errorf("native function descriptors extend beyond their ELF section")
+	}
+	m.funcStart, m.funcEnd = uintptr(funcStart.Value), uintptr(funcEnd.Value)
 	for _, p := range f.Progs {
 		if p.Type == elf.PT_LOAD && p.Flags&elf.PF_X != 0 {
 			m.segments = append(m.segments, p.ProgHeader)
 		}
 	}
+	section := f.Section(".typelink")
+	if section == nil {
+		return nil, fmt.Errorf("missing native receiver type links")
+	}
+	data, err := section.Data()
+	if err != nil {
+		return nil, err
+	}
+	// Typelinks usually keeps *T rather than T. Index the named element so
+	// both pkg.T.M-fm and pkg.(*T).M-fm can resolve their receiver directly.
+	for len(data) >= 4 {
+		offset := int32(binary.LittleEndian.Uint32(data))
+		typ := nativeReflectType(unsafe.Pointer(m.typeStart + uintptr(offset)))
+		data = data[4:]
+		if typ.Kind() == reflect.Pointer {
+			typ = typ.Elem()
+		}
+		if typ.Name() == "" {
+			continue
+		}
+		key := typ.PkgPath() + "." + typ.Name()
+		if prev, ok := m.receivers[key]; ok && prev != typ {
+			// Function-local types can share PkgPath and Name with a
+			// package-level type. Do not select one by traversal order.
+			m.receivers[key] = nil
+		} else {
+			m.receivers[key] = typ
+		}
+	}
 	return m, nil
 }
 
-func (m *nativeMetadata) layout(pc uintptr) (reflect.Type, error) {
+// captureFree comes from a static funcval address when saving, or an empty Env
+// reference when loading. Cache it so restored heap funcvals can be saved again.
+func (m *nativeMetadata) layout(pc uintptr, captureFree bool) (reflect.Type, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sym := m.functions[pc]
 	name := strings.TrimSuffix(sym.Name, ".abi0")
-	if pc == 0 || name == "" || strings.Contains(name, "[") || strings.HasSuffix(name, "-fm") || strings.Contains(name, "-range") || name == "reflect.makeFuncStub" || name == "reflect.methodValueCall" {
+	if pc == 0 || name == "" || strings.Contains(name, "[") || strings.Contains(name, "-range") || name == "reflect.makeFuncStub" || name == "reflect.methodValueCall" || captureFree && strings.HasSuffix(name, "-fm") {
 		return nil, fmt.Errorf("function %#x (%s) has no supported native closure layout", pc, name)
 	}
 	if typ := m.layouts[pc]; typ != nil {
+		if captureFree && typ.NumField() != 1 {
+			return nil, fmt.Errorf("function %#x (%s) has a captured environment", pc, name)
+		}
 		return typ, nil
 	}
-	// Go 1.26 closureName uses .funcN, .funcN.M, .gowrapN and .deferwrapN.
-	// Only ordinary named functions can be treated as having no environment.
-	closure := false
-	for _, marker := range []string{".func", ".gowrap", ".deferwrap", ".glob."} {
-		if i := strings.LastIndex(name, marker); i >= 0 && i+len(marker) < len(name) {
-			c := name[i+len(marker)]
-			closure = closure || c >= '0' && c <= '9'
-		}
-	}
-	if !closure {
+	if captureFree {
 		typ := reflect.TypeFor[struct{ F uintptr }]()
 		m.layouts[pc] = typ
 		return typ, nil
 	}
-
+	if strings.HasSuffix(name, "-fm") {
+		prefix := name[:strings.LastIndexByte(name, '.')]
+		pkg, recv := "", prefix
+		if i := strings.LastIndexByte(prefix, '.'); i >= 0 {
+			pkg, recv = prefix[:i], prefix[i+1:]
+		}
+		pkg, err := url.PathUnescape(pkg)
+		if err != nil {
+			return nil, fmt.Errorf("method %s package path: %w", name, err)
+		}
+		pointer := strings.HasPrefix(recv, "(*") && strings.HasSuffix(recv, ")")
+		if pointer {
+			recv = recv[2 : len(recv)-1]
+		}
+		typ, ok := m.receivers[pkg+"."+recv]
+		if !ok || typ == nil {
+			return nil, fmt.Errorf("method %s has no unique static receiver type", name)
+		}
+		if pointer {
+			typ = reflect.PointerTo(typ)
+		}
+		// MethodValueType in the Go compiler uses F + R, including a
+		// zero-sized R. A nil pointer receiver still occupies its field.
+		layout := reflect.StructOf([]reflect.StructField{
+			{Name: "F", Type: reflect.TypeFor[uintptr]()},
+			{Name: "R", Type: typ},
+		})
+		m.layouts[pc] = layout
+		return layout, nil
+	}
 	// Try lexical parents, including inlining prefixes. For p.F.factory.func1,
 	// p.F.factory may not exist, while p.F contains the inlined allocation.
 	// Never fall back to scanning all of .text.

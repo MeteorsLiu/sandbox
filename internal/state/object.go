@@ -359,6 +359,7 @@ func (*channelData) load(r *reader) object {
 
 // functionValue identifies code in the same executable and the closure storage
 // in the object graph. Env references preserve shared and recursive closures.
+// A nonzero PC with Env.Root == 0 has no captures; Load creates only a PC word.
 // For reflect.makeFuncStub, Env refers to the callback slot; the destination
 // function type supplies the signature used to rebuild the MakeFunc wrapper.
 type functionValue struct {

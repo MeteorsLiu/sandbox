@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -128,13 +127,15 @@ func TestMakeFuncCallLayout(t *testing.T) {
 	}
 }
 
-func TestMakeFuncMissingCallbackLayout(t *testing.T) {
-	// The native codec still requires a discoverable allocation for anonymous
-	// callbacks, including this non-capturing literal. MakeFunc does not bypass it.
-	src := reflect.MakeFunc(reflect.TypeFor[func()](), func([]reflect.Value) []reflect.Value { return nil }).Interface().(func())
-	_, _, err := Save(context.Background(), make([]byte, 4096), &src)
-	if err == nil || !strings.Contains(err.Error(), "no supported native closure layout") {
-		t.Fatalf("callback without an allocation layout: %v", err)
+func TestMakeFuncCaptureFreeCallback(t *testing.T) {
+	src := reflect.MakeFunc(reflect.TypeFor[func(int) int](), func(args []reflect.Value) []reflect.Value {
+		return []reflect.Value{reflect.ValueOf(int(args[0].Int()) * 2)}
+	}).Interface().(func(int) int)
+	var dst func(int) int
+	roundtrip(t, &src, &dst)
+	runtime.GC()
+	if got := dst(21); got != 42 {
+		t.Fatalf("MakeFunc with a capture-free callback returned %d", got)
 	}
 }
 

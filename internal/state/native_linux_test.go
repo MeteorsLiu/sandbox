@@ -11,9 +11,15 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func nativeDouble(n int) int { return n * 2 }
+
+//go:noinline
+func nativeCaptureFree() func(int) int { return func(n int) int { return n * 2 } }
+
+var nativeGlobalCaptureFree = func(n int) int { return n * 2 }
 
 func nativeELFClosure(n *int) func() int {
 	value := reflect.ValueOf(n).Elem()
@@ -31,7 +37,7 @@ func TestNativeELFLayoutCache(t *testing.T) {
 	n := 42
 	fn := nativeELFClosure(&n)
 	pc := reflect.ValueOf(fn).Pointer()
-	layout, err := m.layout(pc)
+	layout, err := m.layout(pc, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +53,7 @@ func TestNativeELFLayoutCache(t *testing.T) {
 	// A cached lookup must not reopen or read the executable.
 	m.path = filepath.Join(t.TempDir(), "missing-executable")
 	for i := 0; i < 3; i++ {
-		got, err := m.layout(pc)
+		got, err := m.layout(pc, false)
 		if err != nil || got != layout {
 			t.Fatalf("cached lookup: %v, %v", got, err)
 		}
@@ -96,7 +102,7 @@ func TestNativeScalarCapture(t *testing.T) {
 func requireNativeValueCapture(t *testing.T, fn any) {
 	t.Helper()
 	var native nativeState
-	layout := native.layout(reflect.ValueOf(fn).Pointer())
+	layout := native.layout(reflect.ValueOf(fn).Pointer(), false)
 	for i := 1; i < layout.NumField(); i++ {
 		if layout.Field(i).Type == reflect.TypeFor[reflect.Value]() {
 			return
@@ -106,7 +112,7 @@ func requireNativeValueCapture(t *testing.T, fn any) {
 }
 
 func TestNativeFunction(t *testing.T) {
-	for _, src := range []func(int) int{nil, nativeDouble} {
+	for _, src := range []func(int) int{nil, nativeDouble, nativeCaptureFree(), nativeGlobalCaptureFree, func(n int) int { return n * 2 }} {
 		var dst func(int) int
 		roundtrip(t, &src, &dst)
 		if src == nil {
@@ -116,6 +122,153 @@ func TestNativeFunction(t *testing.T) {
 		} else if dst(21) != 42 {
 			t.Fatal("restored static function returned a different result")
 		}
+	}
+}
+
+func TestNativeCaptureFreeLayout(t *testing.T) {
+	m, err := loadNativeMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.layouts) != 0 {
+		t.Fatal("loaded layouts before inspecting a function value")
+	}
+	// Static function values must resolve without reading factory instructions.
+	m.path = filepath.Join(t.TempDir(), "missing-executable")
+	for _, fn := range []func(int) int{nativeCaptureFree(), nativeGlobalCaptureFree} {
+		pc := reflect.ValueOf(fn).Pointer()
+		addr := uintptr(*(*unsafe.Pointer)(unsafe.Pointer(&fn)))
+		if addr < m.funcStart || addr >= m.funcEnd {
+			t.Fatal("capture-free funcval is outside the static descriptor range")
+		}
+		layout, err := m.layout(pc, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if layout != reflect.TypeFor[struct{ F uintptr }]() {
+			t.Fatalf("capture-free function has environment: %v", layout)
+		}
+		if cached, err := m.layout(pc, false); err != nil || cached != layout {
+			t.Fatalf("cached capture-free layout: %v, %v", cached, err)
+		}
+	}
+	// An unavailable allocation is not evidence that a closure has no captures.
+	fn := nativeScalarClosure(42)
+	pc := reflect.ValueOf(fn).Pointer()
+	if _, err := m.layout(pc, false); err == nil {
+		t.Fatal("capturing closure accepted without its environment layout")
+	}
+	runtime.KeepAlive(fn)
+}
+
+func TestNativeCaptureFreeRecord(t *testing.T) {
+	fn := nativeCaptureFree()
+	pc := reflect.ValueOf(fn).Pointer()
+	mem := make([]byte, 4096)
+	for i := 0; i < 3; i++ {
+		n, _, err := Save(context.Background(), mem, &fn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := reader{mem: mem[:n]}
+		typeBytes, isObject, err := readHeader(&r)
+		if err != nil || isObject || typeBytes != 0 {
+			t.Fatalf("capture-free function emitted a type table: %d, %v, %v", typeBytes, isObject, err)
+		}
+		count, isObject, err := readHeader(&r)
+		if err != nil || !isObject || count != 1 {
+			t.Fatalf("capture-free function emitted environment objects: %d, %v, %v", count, isObject, err)
+		}
+		if id, err := r.get(); err != nil || id != uintValue(1) {
+			t.Fatalf("root object: %v, %v", id, err)
+		}
+		obj, err := r.get()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, ok := obj.(*functionValue)
+		if !ok || f.PC != uintValue(pc) || f.Env.Root != 0 || r.pos != n {
+			t.Fatalf("capture-free record: %#v, read=%d written=%d", obj, r.pos, n)
+		}
+		fn = nil
+		if _, err := Load(context.Background(), mem[:n], &fn); err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		if got := fn(21); got != 42 {
+			t.Fatalf("round trip %d returned %d", i, got)
+		}
+	}
+}
+
+func TestNativeCaptureFreeLayoutConflict(t *testing.T) {
+	m, err := loadNativeMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := nativeScalarClosure(42)
+	pc := reflect.ValueOf(fn).Pointer()
+	layout, err := m.layout(pc, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.layout(pc, true); err == nil {
+		t.Fatal("accepted a capture-free record for a known capturing closure")
+	}
+	if cached, err := m.layout(pc, false); err != nil || cached != layout {
+		t.Fatalf("conflicting record changed cached layout: %v, %v", cached, err)
+	}
+	runtime.KeepAlive(fn)
+}
+
+func TestNativeCaptureFreeNewProcess(t *testing.T) {
+	const imageEnv = "SANDBOX_STATE_CAPTURE_FREE_TEST_IMAGE"
+	if path := os.Getenv(imageEnv); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var restored func(int) int
+		if _, err := Load(context.Background(), data, &restored); err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		if got := restored(21); got != 42 {
+			t.Fatalf("restored capture-free function returned %d", got)
+		}
+		m, err := executableNativeMetadata()
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := uintptr(*(*unsafe.Pointer)(unsafe.Pointer(&restored)))
+		if addr >= m.funcStart && addr < m.funcEnd {
+			t.Fatal("restored funcval unexpectedly reused a static descriptor")
+		}
+		var again func(int) int
+		roundtrip(t, &restored, &again)
+		if got := again(21); got != 42 {
+			t.Fatalf("resaved capture-free function returned %d", got)
+		}
+		return
+	}
+	fn := nativeCaptureFree()
+	data := make([]byte, 1<<20)
+	n, _, err := Save(context.Background(), data, &fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "capture-free.state")
+	if err := os.WriteFile(path, data[:n], 0600); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestNativeCaptureFreeNewProcess$")
+	cmd.Env = append(os.Environ(), imageEnv+"="+path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
 	}
 }
 
@@ -302,20 +455,24 @@ func TestNativeReflectValue(t *testing.T) {
 }
 
 func TestNativeInvalidPC(t *testing.T) {
-	w := writer{mem: make([]byte, 1024)}
-	if err := writeHeader(&w, 0, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeHeader(&w, 1, true); err != nil {
-		t.Fatal(err)
-	}
-	for _, obj := range []object{uintValue(1), &functionValue{PC: 1, Env: refValue{Root: 2}}} {
-		if err := w.put(obj); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var dst func()
-	if _, err := Load(context.Background(), w.mem[:w.pos], &dst); err == nil || !strings.Contains(err.Error(), "no supported native closure layout") {
-		t.Fatalf("invalid PC: %v", err)
+	for name, env := range map[string]refValue{"without-env": {}, "with-env": {Root: 2}} {
+		t.Run(name, func(t *testing.T) {
+			w := writer{mem: make([]byte, 1024)}
+			if err := writeHeader(&w, 0, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeHeader(&w, 1, true); err != nil {
+				t.Fatal(err)
+			}
+			for _, obj := range []object{uintValue(1), &functionValue{PC: 1, Env: env}} {
+				if err := w.put(obj); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var dst func()
+			if _, err := Load(context.Background(), w.mem[:w.pos], &dst); err == nil || !strings.Contains(err.Error(), "no supported native closure layout") {
+				t.Fatalf("invalid PC: %v", err)
+			}
+		})
 	}
 }

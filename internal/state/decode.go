@@ -491,7 +491,7 @@ func (ds *decodeState) findType(t typeSpec) reflect.Type {
 	case *mapType:
 		return reflect.MapOf(ds.findType(x.Key), ds.findType(x.Value))
 	case closureType:
-		return ds.native.layout(uintptr(x))
+		return ds.native.layout(uintptr(x), false)
 	default:
 		// Should not happen.
 		Failf("unknown type %#v", t)

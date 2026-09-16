@@ -40,14 +40,17 @@ func makeFuncCallback(obj reflect.Value) reflect.Value {
 	return reflect.ValueOf(&impl.fn).Elem()
 }
 
-func (ns *nativeState) layout(pc uintptr) reflect.Type {
+func (ns *nativeState) layout(pc uintptr, captureFree bool) reflect.Type {
 	m, err := executableNativeMetadata()
 	if err != nil {
 		Failf("native closure metadata: %w", err)
 	}
-	typ, err := m.layout(pc)
+	typ, err := m.layout(pc, captureFree)
 	if err != nil {
 		Failf("native closure layout: %w", err)
+	}
+	if typ.NumField() == 1 {
+		return typ
 	}
 	if ns.storage == nil {
 		ns.storage = make(map[reflect.Type]uintptr)
@@ -69,15 +72,22 @@ func (es *encodeState) encodeFunction(obj reflect.Value, dest *object) {
 		runtime.KeepAlive(obj)
 		return
 	}
-	typ := es.native.layout(pc)
 	if !obj.CanAddr() {
 		v := reflect.New(obj.Type()).Elem()
 		v.Set(obj)
 		obj = v
 	}
 	storage := *(*unsafe.Pointer)(obj.Addr().UnsafePointer())
+	m, err := executableNativeMetadata()
+	if err != nil {
+		Failf("native closure metadata: %w", err)
+	}
+	addr := uintptr(storage)
+	typ := es.native.layout(pc, addr >= m.funcStart && addr < m.funcEnd)
 	f.PC = uintValue(pc)
-	es.resolve(reflect.NewAt(typ, storage), &f.Env)
+	if typ.NumField() != 1 {
+		es.resolve(reflect.NewAt(typ, storage), &f.Env)
+	}
 	runtime.KeepAlive(obj)
 }
 
@@ -90,12 +100,22 @@ func (ds *decodeState) decodeFunction(obj reflect.Value, f *functionValue) {
 	if obj.Kind() != reflect.Func {
 		Failf("function record cannot be decoded into %v", obj.Type())
 	}
+	if len(f.Env.Dots) != 0 {
+		Failf("invalid closure environment reference")
+	}
 	if f.PC == 0 && f.Env.Root == 0 {
 		obj.SetZero()
 		return
 	}
-	if f.PC == 0 || f.Env.Root == 0 || len(f.Env.Dots) != 0 {
+	if f.PC == 0 {
 		Failf("invalid closure PC or environment reference")
+	}
+	if f.Env.Root == 0 {
+		ds.native.layout(uintptr(f.PC), true)
+		storage := new(uintptr)
+		*storage = uintptr(f.PC)
+		*(*unsafe.Pointer)(obj.Addr().UnsafePointer()) = unsafe.Pointer(storage)
+		return
 	}
 	if uintptr(f.PC) == makeFuncPC {
 		typ := reflect.TypeFor[func([]reflect.Value) []reflect.Value]()
@@ -119,7 +139,7 @@ func (ds *decodeState) decodeFunction(obj reflect.Value, f *functionValue) {
 		obj.Set(fn.Convert(obj.Type()))
 		return
 	}
-	typ := ds.native.layout(uintptr(f.PC))
+	typ := ds.native.layout(uintptr(f.PC), false)
 	storage := ds.register(&f.Env, typ)
 	if storage.Type() != typ {
 		Failf("closure environment has type %v, want %v", storage.Type(), typ)
