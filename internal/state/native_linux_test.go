@@ -164,7 +164,13 @@ func TestNativeNewProcess(t *testing.T) {
 	}
 	p := &captured{n: 40}
 	var value any = p
-	fn := func() int { p.n++; return value.(*captured).n + 1 }
+	typ := reflect.StructOf([]reflect.StructField{{Name: "Result", Type: reflect.TypeFor[int](), Tag: `state:"closure"`}})
+	fn := func() int {
+		p.n++
+		result := reflect.New(typ).Elem()
+		result.Field(0).SetInt(int64(value.(*captured).n + 1))
+		return int(result.Field(0).Int())
+	}
 	mem := make([]byte, 1<<20)
 	n, _, err := Save(context.Background(), mem, &fn)
 	if err != nil {
@@ -190,6 +196,9 @@ func TestNativeNewProcess(t *testing.T) {
 
 func TestNativeInvalidPC(t *testing.T) {
 	w := writer{mem: make([]byte, 1024)}
+	if err := writeHeader(&w, 0, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeHeader(&w, 1, true); err != nil {
 		t.Fatal(err)
 	}

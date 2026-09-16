@@ -19,6 +19,8 @@ import (
 	"context"
 	"reflect"
 	"sort"
+
+	"github.com/xgo-dev/sandbox/internal/reflecttype"
 )
 
 // objectEncodeState the type and identity of an object occupying a memory
@@ -64,6 +66,8 @@ type encodeState struct {
 
 	// types is the type database.
 	types typeEncodeDatabase
+
+	reflected map[reflect.Type]*reflectedType
 
 	native nativeState
 
@@ -545,44 +549,49 @@ func (es *encodeState) encodeArray(obj reflect.Value, dest *object) {
 	}
 }
 
-// findType recursively finds type information.
+// findType records the type needed to allocate an object during decoding.
 func (es *encodeState) findType(typ reflect.Type) typeSpec {
 	if pc, ok := es.native.storage[typ]; ok {
 		return closureType(pc)
 	}
-	// First: check if this is a proper type. It's possible for pointers,
-	// slices, arrays, maps, etc to all have some different type.
-	te, ok := es.types.Lookup(typ)
-	if te != nil {
+	if _, custom := reflect.Zero(reflect.PointerTo(typ)).Interface().(Type); custom {
+		te, ok := es.types.Lookup(typ)
+		if te == nil {
+			Failf("unregistered custom state type %v", typ)
+		}
 		if !ok {
-			// See encodeStruct.
 			es.pendingTypes = append(es.pendingTypes, te.typeDescriptor)
 		}
 		return typeSpecID(te.ID)
 	}
-
-	if typ.Name() == "" {
-		switch typ.Kind() {
-		case reflect.Ptr:
-			return &pointerType{Type: es.findType(typ.Elem())}
-		case reflect.Slice:
-			return &sliceType{Type: es.findType(typ.Elem())}
-		case reflect.Array:
-			return &arrayType{Count: uintValue(typ.Len()), Type: es.findType(typ.Elem())}
-		case reflect.Map:
-			return &mapType{Key: es.findType(typ.Key()), Value: es.findType(typ.Elem())}
-		}
+	if ref := es.reflected[typ]; ref != nil {
+		return ref
 	}
-	m := es.native.metadata()
-	addr := nativeTypeAddress(typ)
-	if m.types[addr] != typ {
-		Failf("type %q is not present in executable DWARF", typ)
+	// Static types need not occur in reflect's caches. SliceOf always caches
+	// its result, making typ a dependency discoverable by parameterless Export.
+	// For example, this includes a named struct passed only as a reflect.Type.
+	reflect.SliceOf(typ)
+	if es.reflected == nil {
+		es.reflected = make(map[reflect.Type]*reflectedType)
 	}
-	return nativeType(addr)
+	ref := &reflectedType{}
+	es.reflected[typ] = ref
+	return ref
 }
 
 // encodeInterface encodes an interface.
 func (es *encodeState) encodeInterface(obj reflect.Value, dest *object) {
+	if !obj.IsNil() {
+		if typ, ok := obj.Interface().(reflect.Type); ok {
+			// Keep the interface envelope: array and map codecs omit repeated
+			// object tags, including for []any{reflect.TypeOf(0), 42, nil}.
+			*dest = &interfaceValue{
+				Type:  es.findType(obj.Type()),
+				Value: &reflectTypeValue{Type: es.findType(typ)},
+			}
+			return
+		}
+	}
 	// Dereference the object.
 	obj = obj.Elem()
 	if !obj.IsValid() {
@@ -669,6 +678,12 @@ const (
 func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest *object) {
 	if obj.CanAddr() && !obj.CanInterface() {
 		obj = reflectValueRWAddr(obj).Elem()
+	}
+	if obj.Kind() != reflect.Interface && obj.CanInterface() {
+		if typ, ok := obj.Interface().(reflect.Type); ok {
+			*dest = &reflectTypeValue{Type: es.findType(typ)}
+			return
+		}
 	}
 	if how == encodeDefault && isPrimitiveZero(obj.Type()) && obj.IsZero() {
 		*dest = nilValue{}
@@ -778,6 +793,28 @@ func (es *encodeState) Save(obj reflect.Value) {
 	if len(es.pending) == 0 {
 		Failf("pending is empty?")
 	}
+
+	// Types synthesized while walking slices or native closure storage now
+	// exist in the caches. Assign their final snapshot IDs before writing values.
+	var typeData []byte
+	if len(es.reflected) != 0 {
+		snapshot, err := reflecttype.Export()
+		if err != nil {
+			Failf("export reflect types: %w", err)
+		}
+		for typ, ref := range es.reflected {
+			id, ok := snapshot.IDs[typ]
+			if !ok {
+				Failf("type %v is missing from the reflect snapshot", typ)
+			}
+			ref.ID = uintValue(id)
+		}
+		typeData = snapshot.Data
+	}
+	if err := writeHeader(&es.w, uint64(len(typeData)), false); err != nil {
+		Failf("error writing type table header: %w", err)
+	}
+	es.w.writeBytes(typeData)
 
 	// Write the header with the number of objects.
 	if err := writeHeader(&es.w, uint64(len(es.pending)), true); err != nil {

@@ -343,6 +343,17 @@ func (*functionValue) load(r *reader) object {
 	return &functionValue{PC: loadUint(r), Env: loadRef(r)}
 }
 
+// reflectTypeValue represents a type itself, without traversing *reflect.rtype.
+type reflectTypeValue struct {
+	Type typeSpec
+}
+
+func (t *reflectTypeValue) save(w *writer) { saveTypeSpec(w, t.Type) }
+
+func (*reflectTypeValue) load(r *reader) object {
+	return &reflectTypeValue{Type: loadTypeSpec(r)}
+}
+
 // loadSlice loads an object of type sliceValue.
 func loadSlice(r *reader) sliceValue {
 	return sliceValue{
@@ -479,6 +490,14 @@ type typeSpecID uintValue
 
 func (typeSpecID) isTypeSpec() {}
 
+// reflectedType is filled from Snapshot.IDs after graph traversal. It is not
+// a custom StateSave schema ID, which continues to use typeSpecID.
+type reflectedType struct {
+	ID uintValue
+}
+
+func (*reflectedType) isTypeSpec() {}
+
 // pointerType is a pointer type.
 type pointerType struct {
 	Type typeSpec
@@ -536,6 +555,7 @@ const (
 	typeSpecNil
 	typeSpecNative
 	typeSpecClosure
+	typeSpecReflected
 )
 
 // loadTypeSpec loads typeSpec values.
@@ -567,6 +587,8 @@ func loadTypeSpec(r *reader) typeSpec {
 		return nativeType(loadUint(r))
 	case typeSpecClosure:
 		return closureType(loadUint(r))
+	case typeSpecReflected:
+		return &reflectedType{ID: loadUint(r)}
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr))
@@ -601,6 +623,9 @@ func saveTypeSpec(w *writer, t typeSpec) {
 	case closureType:
 		typeSpecClosure.save(w)
 		uintValue(x).save(w)
+	case *reflectedType:
+		typeSpecReflected.save(w)
+		x.ID.save(w)
 	default:
 		// This should not happen?
 		panic(fmt.Errorf("unknown type %T", t))
@@ -810,6 +835,7 @@ const (
 	typeComplex128
 	typeType
 	typeFunction
+	typeReflectType
 )
 
 // saveObject saves the given object.
@@ -876,6 +902,9 @@ func saveObject(w *writer, obj object) {
 	case *functionValue:
 		typeFunction.save(w)
 		x.save(w)
+	case *reflectTypeValue:
+		typeReflectType.save(w)
+		x.save(w)
 	default:
 		panic(fmt.Errorf("unknown type: %#v", obj))
 	}
@@ -926,6 +955,8 @@ func loadObject(r *reader) object {
 		return ((*typeDescriptor)(nil)).load(r) // Escapes.
 	case typeFunction:
 		return ((*functionValue)(nil)).load(r)
+	case typeReflectType:
+		return ((*reflectTypeValue)(nil)).load(r)
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr))

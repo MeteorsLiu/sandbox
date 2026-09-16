@@ -88,6 +88,9 @@ func (e *ErrState) Unwrap() error {
 
 // Save writes the object graph to mem and returns the number of bytes written.
 // The caller owns mem; Save does not allocate a replacement when it is full.
+// The stream starts with a reflect type table, followed by the object graph.
+// Standard reflected types and represented reflect.Type values are supported;
+// reconstructing a type does not add support for values such as live channels.
 // Native functions require the same non-PIE Go executable, with capture DWARF,
 // on both ends. Captured objects are saved; package globals are not captured.
 func Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {

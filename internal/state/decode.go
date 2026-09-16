@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+
+	"github.com/xgo-dev/sandbox/internal/reflecttype"
 )
 
 // internalCallback is a interface called on object completion.
@@ -156,6 +158,8 @@ type decodeState struct {
 
 	// types is the type database.
 	types typeDecodeDatabase
+
+	reflected *reflecttype.ReflectType
 
 	native    nativeState
 	functions []decodedFunction
@@ -450,6 +454,15 @@ func (ds *decodeState) decodeArray(ods *objectDecodeState, obj reflect.Value, en
 // findType finds the type for the given typeSpec.
 func (ds *decodeState) findType(t typeSpec) reflect.Type {
 	switch x := t.(type) {
+	case *reflectedType:
+		if ds.reflected == nil || uint64(x.ID) > uint64(^uint32(0)) {
+			Failf("invalid reflect type reference %d", x.ID)
+		}
+		typ, err := ds.reflected.Resolve(uint32(x.ID))
+		if err != nil {
+			Failf("resolve reflect type: %w", err)
+		}
+		return typ
 	case typeSpecID:
 		typ := ds.types.LookupType(typeID(x))
 		rte := ds.types.Lookup(typeID(x), typ)
@@ -605,6 +618,13 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		ds.decodeInterface(ods, obj, x)
 	case *functionValue:
 		ds.decodeFunction(obj, x)
+	case *reflectTypeValue:
+		typ := ds.findType(x.Type)
+		value := reflect.ValueOf(typ)
+		if !value.Type().AssignableTo(obj.Type()) {
+			Failf("reflect.Type cannot be assigned to %v", obj.Type())
+		}
+		obj.Set(value)
 	default:
 		// Should not happen, not propagated as an error.
 		Failf("unknown object %#v for %q", encoded, obj.Type().Name())
@@ -619,6 +639,22 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	defer ds.stats.fini(func(id typeID) string {
 		return ds.types.LookupName(id)
 	})
+
+	// Restore types before allocating objects that refer to their snapshot IDs.
+	typeBytes, isObject, err := readHeader(&ds.r)
+	if err != nil {
+		Failf("type table header: %w", err)
+	}
+	if isObject {
+		Failf("reflect type table missing")
+	}
+	data := ds.r.readBytes(typeBytes)
+	if len(data) != 0 {
+		ds.reflected, err = reflecttype.Open(data)
+		if err != nil {
+			Failf("import reflect types: %w", err)
+		}
+	}
 
 	// Add the root object with ID 1.
 	_ = ds.addObject(1, obj)
