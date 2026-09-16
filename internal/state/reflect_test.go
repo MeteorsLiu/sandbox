@@ -196,6 +196,11 @@ func TestReflectedTypeIDsInStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	length, objects, err = readHeader(&r)
+	if err != nil || objects {
+		t.Fatalf("reflectx table header: %v", err)
+	}
+	r.readBytes(length)
 	if _, _, err := readHeader(&r); err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +223,12 @@ func TestReflectedTypeIDsInStream(t *testing.T) {
 	tableReader := reader{mem: mem[:n]}
 	tableLength, _, _ := readHeader(&tableReader)
 	table := tableReader.readBytes(tableLength)
+	if err := writeHeader(&w, uint64(len(table)), false); err != nil {
+		t.Fatal(err)
+	}
+	w.writeBytes(table)
+	tableLength, _, _ = readHeader(&tableReader)
+	table = tableReader.readBytes(tableLength)
 	if err := writeHeader(&w, uint64(len(table)), false); err != nil {
 		t.Fatal(err)
 	}

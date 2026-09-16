@@ -88,8 +88,12 @@ func (e *ErrState) Unwrap() error {
 
 // Save writes the object graph to mem and returns the number of bytes written.
 // The caller owns mem; Save does not allocate a replacement when it is full.
-// The stream starts with a reflect type table, followed by the object graph.
-// Standard reflected types and represented reflect.Type values are supported.
+// The stream starts with standard reflect and reflectx type tables, followed
+// by the object graph. Type references prefer the standard table. Dynamic
+// reflectx types without concrete methods are reconstructed in the second table.
+// reflect.Type and xtype.Type values refer to these tables; host descriptor
+// addresses are not transferred. Finish type construction and context resets
+// before Save or Load, including constructors outside the source object graph.
 // Channels preserve capacity, FIFO values, closed state and aliases in the new
 // graph. Waiting goroutines, runtime-attached timers and synctest channels are
 // rejected. Legacy timer modes without a channel timer link cannot be detected.

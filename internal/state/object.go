@@ -546,7 +546,8 @@ func (typeSpecID) isTypeSpec() {}
 // reflectedType is filled from Snapshot.IDs after graph traversal. It is not
 // a custom StateSave schema ID, which continues to use typeSpecID.
 type reflectedType struct {
-	ID uintValue
+	ID       uintValue
+	reflectx bool
 }
 
 func (*reflectedType) isTypeSpec() {}
@@ -605,6 +606,7 @@ const (
 	typeSpecNil
 	typeSpecClosure
 	typeSpecReflected
+	typeSpecReflectx
 )
 
 // loadTypeSpec loads typeSpec values.
@@ -636,6 +638,8 @@ func loadTypeSpec(r *reader) typeSpec {
 		return closureType(loadUint(r))
 	case typeSpecReflected:
 		return &reflectedType{ID: loadUint(r)}
+	case typeSpecReflectx:
+		return &reflectedType{ID: loadUint(r), reflectx: true}
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr))
@@ -668,7 +672,11 @@ func saveTypeSpec(w *writer, t typeSpec) {
 		typeSpecClosure.save(w)
 		uintValue(x).save(w)
 	case *reflectedType:
-		typeSpecReflected.save(w)
+		if x.reflectx {
+			typeSpecReflectx.save(w)
+		} else {
+			typeSpecReflected.save(w)
+		}
 		x.ID.save(w)
 	default:
 		// This should not happen?

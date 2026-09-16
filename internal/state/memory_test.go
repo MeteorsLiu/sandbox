@@ -41,6 +41,8 @@ func objectExamples() []object {
 		&channelValue{}, &channelValue{Capacity: 3, Ref: refValue{Root: 2}},
 		&channelData{}, &channelData{Closed: true, Values: arrayValue{Contents: []object{intValue(10), intValue(20)}}},
 		&reflectedValue{Type: nilType{}, Value: nilValue{}},
+		&reflectTypeValue{Type: &reflectedType{ID: 1}},
+		&reflectTypeValue{Type: &reflectedType{ID: 1, reflectx: true}},
 		&reflectedValue{Type: typeSpecID(1), Value: intValue(42)},
 		&reflectedValue{Type: &pointerType{Type: typeSpecID(1)}, Value: &refValue{Root: 2}, Addressable: true},
 		&refValue{Root: 3, Dots: []dot{&f}, Type: closureType(0x520000)},

@@ -175,6 +175,10 @@ func TestNativeCaptureFreeRecord(t *testing.T) {
 		if err != nil || isObject || typeBytes != 0 {
 			t.Fatalf("capture-free function emitted a type table: %d, %v, %v", typeBytes, isObject, err)
 		}
+		typeBytes, isObject, err = readHeader(&r)
+		if err != nil || isObject || typeBytes != 0 {
+			t.Fatalf("capture-free function emitted a reflectx table: %d, %v, %v", typeBytes, isObject, err)
+		}
 		count, isObject, err := readHeader(&r)
 		if err != nil || !isObject || count != 1 {
 			t.Fatalf("capture-free function emitted environment objects: %d, %v, %v", count, isObject, err)
@@ -458,6 +462,9 @@ func TestNativeInvalidPC(t *testing.T) {
 	for name, env := range map[string]refValue{"without-env": {}, "with-env": {Root: 2}} {
 		t.Run(name, func(t *testing.T) {
 			w := writer{mem: make([]byte, 1024)}
+			if err := writeHeader(&w, 0, false); err != nil {
+				t.Fatal(err)
+			}
 			if err := writeHeader(&w, 0, false); err != nil {
 				t.Fatal(err)
 			}

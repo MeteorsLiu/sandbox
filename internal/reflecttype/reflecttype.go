@@ -22,16 +22,22 @@ type Snapshot struct {
 	IDs  map[reflect.Type]uint32
 }
 
-// Export discovers cached types and encodes their dependencies. Finish creating
-// the types to be transferred before calling Export: cache enumeration is not
+// Export discovers supported cached types and encodes their dependencies.
+// Dynamic named types and interfaces, and composites depending on them, belong
+// to a separate type provider and are omitted from this snapshot.
+// Finish creating the types to be transferred before calling Export: cache enumeration is not
 // an atomic snapshot, and types created afterward need a new export.
-// Each call owns its IDs and data; it does not modify the reflect caches.
+// Each call owns its IDs and data. Standard constructors check that cached
+// dynamic descriptors can be reproduced without an extended type provider.
 func Export() (*Snapshot, error) {
 	if runtime.Version() != "go1.26.6" {
 		return nil, fmt.Errorf("reflecttype requires go1.26.6, got %s", runtime.Version())
 	}
-	e := exporter{ids: make(map[reflect.Type]uint32)}
+	e := exporter{ids: make(map[reflect.Type]uint32), supported: make(map[reflect.Type]bool)}
 	for _, typ := range cachedTypes() {
+		if !e.supports(typ) {
+			continue
+		}
 		if _, err := e.intern(typ); err != nil {
 			return nil, err
 		}
@@ -62,8 +68,70 @@ func (t *ReflectType) Resolve(id uint32) (reflect.Type, error) {
 // primitive kinds need no payload. Composite payloads contain dependency IDs.
 // Function types carry signatures only, never function PCs or environments.
 type exporter struct {
-	ids     map[reflect.Type]uint32
-	entries [][]byte
+	ids       map[reflect.Type]uint32
+	entries   [][]byte
+	supported map[reflect.Type]bool
+}
+
+func (e *exporter) supports(typ reflect.Type) (supported bool) {
+	if builtinTypes[typ.Kind()] == typ {
+		return true
+	}
+	if _, ok := staticTypes().byType[typ]; ok {
+		return true
+	}
+	if supported, ok := e.supported[typ]; ok {
+		return supported
+	}
+	// A cycle outside the executable requires a dynamic named identity. Reserve
+	// false before visiting children so it cannot become an infinite traversal.
+	e.supported[typ] = false
+	if typ.Name() != "" || typ.Kind() == reflect.Interface {
+		return false
+	}
+	for _, child := range appendDependencies(nil, typ) {
+		if !e.supports(child) {
+			return false
+		}
+	}
+	// For example, reflectx can attach private methods to an unnamed struct,
+	// or create private embedded fields that reflect.StructOf rejects. Merely
+	// checking Name and exported methods would silently discard that metadata.
+	defer func() {
+		if recover() != nil {
+			supported = false
+		}
+		e.supported[typ] = supported
+	}()
+	var rebuilt reflect.Type
+	switch typ.Kind() {
+	case reflect.Pointer:
+		rebuilt = reflect.PointerTo(typ.Elem())
+	case reflect.Slice:
+		rebuilt = reflect.SliceOf(typ.Elem())
+	case reflect.Array:
+		rebuilt = reflect.ArrayOf(typ.Len(), typ.Elem())
+	case reflect.Chan:
+		rebuilt = reflect.ChanOf(typ.ChanDir(), typ.Elem())
+	case reflect.Map:
+		rebuilt = reflect.MapOf(typ.Key(), typ.Elem())
+	case reflect.Func:
+		in, out := make([]reflect.Type, typ.NumIn()), make([]reflect.Type, typ.NumOut())
+		for i := range in {
+			in[i] = typ.In(i)
+		}
+		for i := range out {
+			out[i] = typ.Out(i)
+		}
+		rebuilt = reflect.FuncOf(in, out, typ.IsVariadic())
+	case reflect.Struct:
+		fields := make([]reflect.StructField, typ.NumField())
+		for i := range fields {
+			fields[i] = typ.Field(i)
+		}
+		rebuilt = reflect.StructOf(fields)
+	}
+	return rebuilt == typ
 }
 
 func (e *exporter) intern(typ reflect.Type) (uint32, error) {

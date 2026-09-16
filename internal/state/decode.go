@@ -22,7 +22,9 @@ import (
 	"math"
 	"reflect"
 
+	"github.com/visualfc/xtype"
 	"github.com/xgo-dev/sandbox/internal/reflecttype"
+	"github.com/xgo-dev/sandbox/internal/reflectxtype"
 )
 
 // internalCallback is a interface called on object completion.
@@ -160,6 +162,7 @@ type decodeState struct {
 	types typeDecodeDatabase
 
 	reflected *reflecttype.ReflectType
+	reflectx  *reflectxtype.ReflectType
 
 	native    nativeState
 	functions []decodedFunction
@@ -470,8 +473,21 @@ func (ds *decodeState) decodeArray(ods *objectDecodeState, obj reflect.Value, en
 func (ds *decodeState) findType(t typeSpec) reflect.Type {
 	switch x := t.(type) {
 	case *reflectedType:
-		if ds.reflected == nil || uint64(x.ID) > uint64(^uint32(0)) {
+		if uint64(x.ID) > uint64(^uint32(0)) {
 			Failf("invalid reflect type reference %d", x.ID)
+		}
+		if x.reflectx {
+			if ds.reflectx == nil {
+				Failf("reflectx type table missing for reference %d", x.ID)
+			}
+			typ, err := ds.reflectx.Resolve(uint32(x.ID))
+			if err != nil {
+				Failf("resolve reflectx type: %w", err)
+			}
+			return typ
+		}
+		if ds.reflected == nil {
+			Failf("reflect type table missing for reference %d", x.ID)
 		}
 		typ, err := ds.reflected.Resolve(uint32(x.ID))
 		if err != nil {
@@ -632,6 +648,14 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 	case *functionValue:
 		ds.decodeFunction(obj, x)
 	case *reflectTypeValue:
+		if obj.Type() == reflect.TypeFor[xtype.Type]() {
+			if _, empty := x.Type.(nilType); empty {
+				obj.SetZero()
+			} else {
+				obj.Set(reflect.ValueOf(xtype.TypeOfType(ds.findType(x.Type))))
+			}
+			return
+		}
 		typ := ds.findType(x.Type)
 		value := reflect.ValueOf(typ)
 		if !value.Type().AssignableTo(obj.Type()) {
@@ -693,6 +717,19 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		ds.reflected, err = reflecttype.Open(data)
 		if err != nil {
 			Failf("import reflect types: %w", err)
+		}
+	}
+	typeBytes, isObject, err = readHeader(&ds.r)
+	if err != nil {
+		Failf("reflectx type table header: %w", err)
+	}
+	if isObject {
+		Failf("reflectx type table missing")
+	}
+	if data := ds.r.readBytes(typeBytes); len(data) != 0 {
+		ds.reflectx, err = reflectxtype.Open(data)
+		if err != nil {
+			Failf("import reflectx types: %w", err)
 		}
 	}
 

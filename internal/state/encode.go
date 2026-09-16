@@ -19,8 +19,11 @@ import (
 	"context"
 	"reflect"
 	"sort"
+	"unsafe"
 
+	"github.com/visualfc/xtype"
 	"github.com/xgo-dev/sandbox/internal/reflecttype"
+	"github.com/xgo-dev/sandbox/internal/reflectxtype"
 )
 
 // objectEncodeState the type and identity of an object occupying a memory
@@ -627,6 +630,9 @@ func (es *encodeState) encodeInterface(obj reflect.Value, dest *object) {
 // isPrimitive returns true if this is a primitive object, or a composite
 // object composed entirely of primitives.
 func isPrimitiveZero(typ reflect.Type) bool {
+	if typ == reflect.TypeFor[xtype.Type]() {
+		return false
+	}
 	switch typ.Kind() {
 	case reflect.Func, reflect.Chan:
 		return true
@@ -693,6 +699,14 @@ const (
 func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest *object) {
 	if obj.CanAddr() && !obj.CanInterface() {
 		obj = reflectValueRWAddr(obj).Elem()
+	}
+	if obj.Type() == reflect.TypeFor[xtype.Type]() {
+		encoded := &reflectTypeValue{Type: nilType{}}
+		*dest = encoded
+		if typ := obj.Interface().(xtype.Type); typ != nil {
+			encoded.Type = es.findType(nativeReflectType(unsafe.Pointer(typ)))
+		}
+		return
 	}
 	if obj.Type() == reflect.TypeFor[reflect.Value]() {
 		value := obj.Interface().(reflect.Value)
@@ -837,16 +851,28 @@ func (es *encodeState) Save(obj reflect.Value) {
 
 	// Types synthesized while walking slices or native closure storage now
 	// exist in the caches. Assign their final snapshot IDs before writing values.
-	var typeData []byte
+	var typeData, reflectxData []byte
 	if len(es.reflected) != 0 {
 		snapshot, err := reflecttype.Export()
 		if err != nil {
 			Failf("export reflect types: %w", err)
 		}
+		var extended *reflectxtype.Snapshot
 		for typ, ref := range es.reflected {
 			id, ok := snapshot.IDs[typ]
 			if !ok {
-				Failf("type %v is missing from the reflect snapshot", typ)
+				if extended == nil {
+					extended, err = reflectxtype.Export()
+					if err != nil {
+						Failf("export reflectx types: %w", err)
+					}
+					reflectxData = extended.Data
+				}
+				id, ok = extended.IDs[typ]
+				if !ok {
+					Failf("type %v is missing from the reflect and reflectx snapshots", typ)
+				}
+				ref.reflectx = true
 			}
 			ref.ID = uintValue(id)
 		}
@@ -856,6 +882,10 @@ func (es *encodeState) Save(obj reflect.Value) {
 		Failf("error writing type table header: %w", err)
 	}
 	es.w.writeBytes(typeData)
+	if err := writeHeader(&es.w, uint64(len(reflectxData)), false); err != nil {
+		Failf("error writing reflectx type table header: %w", err)
+	}
+	es.w.writeBytes(reflectxData)
 
 	// Write the header with the number of objects.
 	if err := writeHeader(&es.w, uint64(len(es.pending)), true); err != nil {
