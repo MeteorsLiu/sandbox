@@ -171,9 +171,10 @@ type decodeState struct {
 	reflectx         *reflectxtype.ReflectType
 	reflectxSnapshot *reflectxtype.Snapshot
 
-	native    nativeState
-	functions []decodedFunction
-	makeFuncs map[reflect.Value]reflect.Value // Callback slots to MakeFunc wrappers.
+	native       nativeState
+	functions    []decodedFunction
+	makeFuncs    map[reflect.Value]reflect.Value // Callback slots to MakeFunc wrappers.
+	typeutilMaps []typeutilMap                   // Rehash after all key objects have been decoded.
 
 	// objectByID is the set of objects in progress.
 	objectsByID []*objectDecodeState
@@ -427,6 +428,9 @@ func (od *objectDecoder) afterLoad(fn func()) {
 
 // decodeStruct decodes a struct value.
 func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, encoded *structValue) {
+	if isTypeutilMap(obj.Type()) {
+		ds.typeutilMaps = append(ds.typeutilMaps, reflectValueRWAddr(obj).Interface().(typeutilMap))
+	}
 	if obj.Type() == reflect.TypeFor[sync.Map]() {
 		ds.decodeSyncMap(ods, obj.Addr().Interface().(*sync.Map), encoded)
 		return
@@ -925,6 +929,9 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	}
 	for callback, fn := range ds.makeFuncs {
 		makeFuncCallback(fn).Set(callback)
+	}
+	for _, m := range ds.typeutilMaps {
+		rehashTypeutilMap(m)
 	}
 
 	// Scan and fire all callbacks. We iterate over the list of incomplete
