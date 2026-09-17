@@ -38,6 +38,12 @@ func main() {
 }
 
 func run() error {
+	if err := checkEnvironment(); err != nil {
+		return err
+	}
+	if err := checkErrorMessage(); err != nil {
+		return err
+	}
 	var calls atomic.Int64
 	s := sandbox.Sandbox{Inspect: func(call *sandbox.Syscall) { calls.Add(1) }}
 	n := 41

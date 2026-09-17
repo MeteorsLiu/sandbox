@@ -26,7 +26,7 @@ github.com/xgo-dev/sandbox/testdata    integration test executable -> smoke
 
 Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through `dlopen` and does not import the Sentry module or gVisor. Each module carries its own C ABI declarations so either module can be fetched independently. The ABI carries guest startup addresses, syscall registers and synchronous inspection and memory mapping callbacks.
 
-The C entry is `RunSandbox`. This host API requires `sentry/v0.4.0`: its first string contains startup JSON with the guest executable and filesystem configuration. Earlier libraries expect an executable path in that position and are incompatible. Build the host and Sentry from the same source revision. Go module version selection does not check the ABI of a library loaded through `dlopen`.
+The C entry is `RunSandbox`. This host API requires `sentry/v0.5.0`: its first string contains startup JSON with the guest executable, filesystem configuration and environment. The `sentry/v0.4.0` backend ignores the environment field; earlier libraries expect an executable path instead of JSON and are incompatible. Build the host and Sentry from the same source revision. Go module version selection does not check the ABI of a library loaded through `dlopen`.
 
 The sandbox module depends on ixgo for rebuilding interpreted closures. It does not depend on LLAR or gVisor. LLAR can continue using its own formula loader and pass an already loaded callback through the ordinary `Run` entry.
 
@@ -84,7 +84,7 @@ err := s.Run(func() { f.OnBuild(ctx) })
 
 An empty `Mounts` retains the default read-only host `/` and guest `/proc`. A nonempty list replaces all defaults. Its first entry must mount `bind` or `tmpfs` at `/`; subsequent mounts are applied in order, so parents and overlay layers must precede their users. Duplicate targets and unsupported types return an error. Missing directory mountpoints are prepared through Sentry's synthetic-mountpoint support, which still requires a writable parent mount. For a read-only parent, prepare the target directory beforehand or place new mountpoints under a writable tmpfs. Bind sources currently must be directories.
 
-Common options are `ro`/`rw`, `noexec`/`exec`, `nosuid`/`suid` and `noatime`/`atime`; the last option in each pair wins. With no `ro`, a mount is writable subject to the underlying filesystem and permissions. Tmpfs and overlay options are passed to their Sentry implementations. Bind transport parameters remain internal. Each `Options` element is one option, without a comma or NUL character. Guest UID/GID remain 1000, the working directory remains `/`, and environment configuration is not yet exposed.
+Common options are `ro`/`rw`, `noexec`/`exec`, `nosuid`/`suid` and `noatime`/`atime`; the last option in each pair wins. With no `ro`, a mount is writable subject to the underlying filesystem and permissions. Tmpfs and overlay options are passed to their Sentry implementations. Bind transport parameters remain internal. Each `Options` element is one option, without a comma or NUL character. Guest UID/GID remain 1000 and the working directory remains `/`.
 
 For an overlay over read-only source, prepare a lower bind mount and an upper tmpfs before attaching the overlay:
 
@@ -98,6 +98,19 @@ s.Mounts = append(s.Mounts,
 ```
 
 Here `/tmp/merged` is the guest's source directory, and its changes disappear with the upper tmpfs. Mount installation output separately through a writable bind to retain build artifacts. Filesystem setup and cleanup belong to each `Run`; syscall inspection continues to occur at the same context-switch boundary.
+
+## Environment
+
+`Sandbox.Env` supplies `KEY=value` entries before the guest initializes its runtime and packages. A nil `Env` inherits the current host environment on each `Run`. An empty non-nil slice (`[]string{}`) creates an empty environment; any other non-nil slice replaces the host environment entirely. Guest changes remain local to the guest and its child processes. Entries containing NUL are rejected.
+
+```go
+s := sandbox.Sandbox{
+    Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "HOME=/work"},
+}
+err := s.Run(func() { f.OnBuild(ctx) })
+```
+
+Use an explicit environment for reproducible builds. To inherit and override selected variables, supply `append(os.Environ(), "LANG=C")` only after removing any existing `LANG` entry; environment entries are passed through without merging or deduplication. An inherited `PATH` still requires the referenced programs and libraries to be visible in the guest filesystem.
 
 ## Host Inspection
 
@@ -343,7 +356,7 @@ This is an executable module with a general `func()` entry, not yet a production
 - Native functions already reachable from the input are authorized for host result restoration. Returning a native function with a previously unseen code entry is rejected. A returned ixgo closure must belong to an original transferred program and its known function set.
 - Input objects stay alive through the call. Imported objects stay alive in the guest even after the closure drops its reference, so their mutations can still reach host aliases. Result decoding finishes before writeback starts; a guest panic, exit failure or malformed result prevents that writeback. External syscall side effects are not rolled back.
 - The shared library retains a Systrap platform and its process-lifetime workers. Each call creates a fresh Sentry kernel/guest. The two Go runtimes still share OS signal dispositions and the host process address space; c-shared isolates dependencies and runtime heaps, not hostile native code within the host.
-- Filesystem policies are supplied through `Mounts`. Environment configuration, cancellation, comprehensive startup-failure cleanup, hostile-image fuzzing and a broader platform/toolchain matrix remain necessary before production use.
+- Filesystem and environment settings are supplied through `Mounts` and `Env`. Cancellation, comprehensive startup-failure cleanup, hostile-image fuzzing and a broader platform/toolchain matrix remain necessary before production use.
 
 ## Verification
 

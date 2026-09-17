@@ -18,7 +18,7 @@ struct syscall_event {
     char *failure;
 };
 typedef void (*inspect_fn)(uintptr_t, struct syscall_event *);
-// The first string is the startup JSON (guest executable and mounts).
+// The first string is the startup JSON (guest executable, mounts and env).
 typedef int (*run_sentry_fn)(char *, int, uintptr_t, uintptr_t, uintptr_t,
                              inspect_fn, char *, size_t);
 

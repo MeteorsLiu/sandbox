@@ -47,8 +47,9 @@ func RunSandbox(config *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_
 		}
 	}()
 	var startup struct {
-		Guest  string  `json:"guest"`
-		Mounts []mount `json:"mounts"`
+		Guest  string   `json:"guest"`
+		Mounts []mount  `json:"mounts"`
+		Env    []string `json:"env"`
 	}
 	if err := json.Unmarshal([]byte(C.GoString(config)), &startup); err != nil {
 		report(fmt.Errorf("Sentry startup configuration: %w", err))
@@ -57,7 +58,7 @@ func RunSandbox(config *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_
 	installSyscallMemory()
 	var inspectionMu sync.Mutex
 	var inspectionErr error
-	err := runSentry(startup.Mounts, startup.Guest, int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, ac *arch.Context64) error {
+	err := runSentry(startup.Mounts, startup.Guest, startup.Env, int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, ac *arch.Context64) error {
 		if callback == nil {
 			return nil
 		}
