@@ -103,9 +103,10 @@ func (e *ErrState) Unwrap() error {
 // Atomic wrappers preserve their values; atomic.Pointer[T] targets are relocated
 // with the object graph. sync.Map saves entries through Range and rebuilds them
 // through Store; keys and values share the same object graph. Its internal hash
-// trie and synchronization state are not copied. Other sync structs are not traversed:
-// they become zero values, including Once's done flag, WaitGroup's counter,
-// Cond.L and Pool.New. Their waiters and synchronization state are not copied.
+// trie and synchronization state are not copied. Pool saves only its New
+// function and captures; Cond saves only its L locker. Other sync structs become
+// zero values, including Once's done flag and WaitGroup's counter. Pool entries,
+// waiters and synchronization state are not copied.
 // reflect.Value preserves its represented type, value and addressability.
 // Values obtained through unexported fields are rejected; their access flags
 // are not transferred. The represented value must itself be supported by Save.
