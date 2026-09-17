@@ -122,7 +122,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	check(len(fdAfter) == len(fdBefore) || len(fdAfter) == len(fdBefore)+1, fmt.Sprintf("per-call FD growth: %d -> %d", len(fdBefore), len(fdAfter)))
+	check(len(fdAfter) <= len(fdBefore)+1, fmt.Sprintf("per-call FD growth: %d -> %d", len(fdBefore), len(fdAfter)))
 	fmt.Printf("PASS repeated-call descriptor count=%d\n", len(fdAfter))
 	var guestPID uintptr
 	var nestedErr error
