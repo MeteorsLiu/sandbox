@@ -598,6 +598,15 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *object) {
 // encodeArray encodes an array.
 func (es *encodeState) encodeArray(obj reflect.Value, dest *object) {
 	l := obj.Len()
+	if l >= bulkArrayThreshold && isNumericArray(obj.Type()) {
+		if !obj.CanAddr() {
+			value := reflect.New(obj.Type()).Elem()
+			value.Set(obj)
+			obj = value
+		}
+		*dest = &rawArrayValue{Data: arrayBytes(obj)}
+		return
+	}
 	a := &arrayValue{
 		Contents: make([]object, l),
 	}

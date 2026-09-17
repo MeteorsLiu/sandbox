@@ -493,6 +493,21 @@ func (*arrayValue) load(r *reader) object {
 	return &a
 }
 
+// rawArrayValue holds numeric array bytes in the executable's native layout.
+// It has no references; the enclosing object keeps its existing object ID.
+type rawArrayValue struct {
+	Data []byte
+}
+
+func (a *rawArrayValue) save(w *writer) {
+	uintValue(len(a.Data)).save(w)
+	w.writeBytes(a.Data)
+}
+
+func (*rawArrayValue) load(r *reader) object {
+	return &rawArrayValue{Data: r.readBytes(uint64(loadUint(r)))}
+}
+
 // mapValue is a map value.
 type mapValue struct {
 	Keys   []object
@@ -907,6 +922,7 @@ const (
 	typeReflectValue
 	typeChannel
 	typeChannelData
+	typeRawArray
 )
 
 // saveObject saves the given object.
@@ -945,6 +961,9 @@ func saveObject(w *writer, obj object) {
 		x.save(w)
 	case *arrayValue:
 		typeArray.save(w)
+		x.save(w)
+	case *rawArrayValue:
+		typeRawArray.save(w)
 		x.save(w)
 	case *mapValue:
 		typeMap.save(w)
@@ -1017,6 +1036,8 @@ func loadObject(r *reader) object {
 		return ((*sliceValue)(nil)).load(r) // Escapes.
 	case typeArray:
 		return ((*arrayValue)(nil)).load(r) // Escapes.
+	case typeRawArray:
+		return ((*rawArrayValue)(nil)).load(r)
 	case typeMap:
 		return ((*mapValue)(nil)).load(r) // Escapes.
 	case typeStruct:

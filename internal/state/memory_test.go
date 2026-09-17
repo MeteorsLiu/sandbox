@@ -33,6 +33,7 @@ func objectExamples() []object {
 		&sliceValue{Length: 2, Capacity: 3, Ref: refValue{Root: 2}},
 		&arrayValue{}, &arrayValue{Contents: []object{intValue(1), intValue(2)}},
 		&arrayValue{Contents: []object{nilValue{}, nilValue{}}},
+		&rawArrayValue{}, &rawArrayValue{Data: []byte{0, 1, 127, 128, 255}},
 		&mapValue{}, &mapValue{Keys: []object{intValue(1), intValue(2)}, Values: []object{boolValue(true), boolValue(false)}},
 		zero, one, many,
 		&interfaceValue{Type: nilType{}, Value: nilValue{}},
