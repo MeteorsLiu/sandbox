@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"sync"
 
 	"github.com/goplus/ixgo"
 	"github.com/visualfc/xtype"
@@ -426,6 +427,10 @@ func (od *objectDecoder) afterLoad(fn func()) {
 
 // decodeStruct decodes a struct value.
 func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, encoded *structValue) {
+	if obj.Type() == reflect.TypeFor[sync.Map]() {
+		ds.decodeSyncMap(ods, obj.Addr().Interface().(*sync.Map), encoded)
+		return
+	}
 	if fields, ok := syncFields(obj); ok {
 		if encoded.TypeID != 0 || encoded.Fields() != len(fields) {
 			Failf("invalid synchronization value for %v", obj.Type())
