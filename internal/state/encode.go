@@ -22,6 +22,7 @@ import (
 	"sort"
 	"unsafe"
 
+	"github.com/goplus/ixgo"
 	"github.com/visualfc/xtype"
 	"github.com/xgo-dev/sandbox/internal/reflecttype"
 	"github.com/xgo-dev/sandbox/internal/reflectxtype"
@@ -87,8 +88,9 @@ type encodeState struct {
 	//
 	// Multiple objects may overlap in memory iff the larger object fully
 	// contains the smaller one, and the type of the smaller object matches
-	// a field or array element's type at the appropriate offset. An
-	// arbitrary number of objects may be nested in this manner.
+	// a field or array element's type at the appropriate offset. Pointer
+	// conversions may also expose the same storage under different types,
+	// such as go/types.Term and go/types.term.
 	//
 	// Note that this does not track zero-sized objects, those are tracked
 	// by zeroValues below.
@@ -150,6 +152,9 @@ type encodeState struct {
 //
 // Precondition: parent and child must occupy the same memory.
 func isSameSizeParent(parent reflect.Value, childType reflect.Type) bool {
+	if parent.Type().Size() == childType.Size() && reflect.PointerTo(parent.Type()).ConvertibleTo(reflect.PointerTo(childType)) {
+		return true
+	}
 	switch parent.Kind() {
 	case reflect.Struct:
 		for i := 0; i < parent.NumField(); i++ {
@@ -306,11 +311,13 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 	if seg.Ok() && seg.Start() < end {
 		existing := seg.Value()
 
-		if seg.Range() == r && typ == existing.obj.Type() {
-			// This exact object is already registered. Avoid the traversal and
-			// just return directly. We don't need to encode the type
-			// information or any dots here.
+		if seg.Range() == r && reflect.PointerTo(existing.obj.Type()).ConvertibleTo(reflect.PointerTo(typ)) {
+			// Preserve the registered type even if a converted pointer is
+			// decoded first; its StateLoad method may differ from the view's.
 			ref.Root = uintValue(existing.id)
+			if typ != existing.obj.Type() {
+				ref.Type = es.findType(existing.obj.Type())
+			}
 			existing.refs = append(existing.refs, ref)
 			return
 		}
@@ -421,8 +428,8 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 // Precondition: The target object must lie completely within the range defined
 // by [rootAddr, rootAddr + sizeof(rootType)].
 func traverse(rootType, targetType reflect.Type, rootAddr, targetAddr uintptr) []dot {
-	// Recursion base case: the types actually match.
-	if targetType == rootType && targetAddr == rootAddr {
+	// A converted pointer names the same object, not its first field.
+	if targetAddr == rootAddr && rootType.Size() == targetType.Size() && reflect.PointerTo(rootType).ConvertibleTo(reflect.PointerTo(targetType)) {
 		return nil
 	}
 
@@ -752,6 +759,20 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 	checkProcessResource(obj.Type())
 	switch obj.Kind() {
 	case reflect.Ptr: // Fast path: first.
+		if obj.Type() == reflect.TypeFor[*ixgo.Package]() {
+			// Packages registered during init belong to the receiving runtime.
+			// Keep nil as an empty path so arrays use one record kind throughout.
+			var path stringValue
+			if !obj.IsNil() {
+				pkg := obj.Interface().(*ixgo.Package)
+				if pkg.Path == "" {
+					Failf("ixgo.Package has no package path")
+				}
+				path = stringValue(pkg.Path)
+			}
+			*dest = &path
+			return
+		}
 		if obj.Type() == reflect.TypeFor[*os.File]() && !obj.IsNil() {
 			for i, stream := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
 				if stream != nil && obj.Interface().(*os.File) == stream && stream.Fd() == uintptr(i) {

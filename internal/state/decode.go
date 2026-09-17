@@ -23,6 +23,7 @@ import (
 	"os"
 	"reflect"
 
+	"github.com/goplus/ixgo"
 	"github.com/visualfc/xtype"
 	"github.com/xgo-dev/sandbox/internal/reflecttype"
 	"github.com/xgo-dev/sandbox/internal/reflectxtype"
@@ -347,7 +348,7 @@ func (ds *decodeState) register(r *refValue, typ reflect.Type) reflect.Value {
 	}
 
 	// Create the object.
-	if len(r.Dots) != 0 {
+	if r.Type != nil {
 		typ = ds.findType(r.Type)
 	}
 	v := reflect.New(typ)
@@ -596,9 +597,13 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 			return
 		}
 
-		// Normal assignment: authoritative only if no dots.
+		// Convert the pointer, retaining the registered object's storage.
 		v := ds.register(x, obj.Type().Elem())
-		obj.Set(reflectValueRWAddr(v))
+		ptr := reflectValueRWAddr(v)
+		if ptr.Type() != obj.Type() {
+			ptr = ptr.Convert(obj.Type())
+		}
+		obj.Set(ptr)
 	case boolValue:
 		obj.SetBool(bool(x))
 	case intValue:
@@ -638,6 +643,18 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 			Failf("complex number truncated from %v to %v", complex128(*x), obj.Complex())
 		}
 	case *stringValue:
+		if obj.Type() == reflect.TypeFor[*ixgo.Package]() {
+			if *x == "" {
+				obj.SetZero()
+				return
+			}
+			pkg, ok := ixgo.LookupPackage(string(*x))
+			if !ok {
+				Failf("ixgo package %q is not registered in this process", *x)
+			}
+			obj.Set(reflect.ValueOf(pkg))
+			return
+		}
 		obj.SetString(string(*x))
 	case *sliceValue:
 		if id := objectID(x.Ref.Root); id == 0 {

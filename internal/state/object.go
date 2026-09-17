@@ -242,9 +242,8 @@ type refValue struct {
 	// Note that this will be stored in reverse order for efficiency.
 	Dots []dot
 
-	// Type is the base type for the root object. This is non-nil iff Dots
-	// is non-zero length (that is, this is a complex reference). This is
-	// not *strictly* necessary, but can be used to simplify decoding.
+	// Type is the root object's type when Dots is nonempty or the pointer
+	// targets a different type through a Go pointer conversion.
 	Type typeSpec
 }
 
@@ -253,7 +252,8 @@ func loadRef(r *reader) refValue {
 	ref := refValue{
 		Root: loadUint(r),
 	}
-	l := loadUint(r)
+	header := loadUint(r)
+	l := header >> 1
 	ref.Dots = make([]dot, l)
 	for i := 0; i < int(l); i++ {
 		// Disambiguate between an index (non-negative) and a field
@@ -267,8 +267,7 @@ func loadRef(r *reader) refValue {
 		fieldName := fieldName(r.readBytes(uint64(-d)))
 		ref.Dots[i] = &fieldName
 	}
-	if l != 0 {
-		// Only if dots is non-zero.
+	if header&1 != 0 {
 		ref.Type = loadTypeSpec(r)
 	}
 	return ref
@@ -277,8 +276,12 @@ func loadRef(r *reader) refValue {
 // save implements object.save.
 func (r *refValue) save(w *writer) {
 	r.Root.save(w)
-	l := uintValue(len(r.Dots))
-	l.save(w)
+	// The low bit marks an explicit root type, independently of the path.
+	header := uintValue(len(r.Dots)) << 1
+	if r.Type != nil {
+		header |= 1
+	}
+	header.save(w)
 	for _, d := range r.Dots {
 		// See LoadRef. We use non-negative numbers to encode index
 		// objects and negative numbers to encode field lengths.
@@ -294,8 +297,7 @@ func (r *refValue) save(w *writer) {
 			panic("unknown dot implementation")
 		}
 	}
-	if l != 0 {
-		// See above.
+	if r.Type != nil {
 		saveTypeSpec(w, r.Type)
 	}
 }
