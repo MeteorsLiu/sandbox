@@ -706,6 +706,11 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		obj.Set(reflectValueRWSlice3(v, 0, int(x.Length), int(x.Capacity)))
 	case *arrayValue:
 		ds.decodeArray(ods, obj, x)
+	case *rawArrayValue:
+		if !isNumericArray(obj.Type()) || uintptr(len(x.Data)) != obj.Type().Size() {
+			Failf("raw array with %d bytes cannot be decoded into %v", len(x.Data), obj.Type())
+		}
+		copy(arrayBytes(obj), x.Data)
 	case *structValue:
 		ds.decodeStruct(ods, obj, x)
 	case *mapValue:
