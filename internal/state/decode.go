@@ -277,6 +277,18 @@ func (ds *decodeState) waitObject(ods *objectDecodeState, encoded object, callba
 		ds.waitObject(ods, rv.Value, callback)
 	} else if fv, ok := encoded.(*functionValue); ok && fv.Env.Root != 0 {
 		ds.wait(ods, objectID(fv.Env.Root), callback)
+	} else if av, ok := encoded.(*arrayValue); ok {
+		blockedBy := ods.blockedBy
+		for _, value := range av.Contents {
+			ds.waitObject(ods, value, nil)
+		}
+		if callback != nil {
+			if ods.blockedBy == blockedBy {
+				callback()
+			} else {
+				ods.addCallback(userCallback(callback))
+			}
+		}
 	} else if callback != nil {
 		// Nothing to wait for: execute the callback immediately.
 		callback()
@@ -472,7 +484,12 @@ func (ds *decodeState) decodeArray(ods *objectDecodeState, obj reflect.Value, en
 	// Decode the contents into the array.
 	for i := 0; i < len(encoded.Contents); i++ {
 		ds.decodeObject(ods, obj.Index(i), encoded.Contents[i])
-		ds.waitObject(ods, encoded.Contents[i], nil)
+		// An inline array is a field, not its owner's completion dependency.
+		// For example, A.Next[0] = B and B.Next[0] = A is an ordinary cycle.
+		// Explicit LoadWait/LoadValue expands these elements in waitObject.
+		if obj == ods.obj {
+			ds.waitObject(ods, encoded.Contents[i], nil)
+		}
 	}
 }
 
@@ -909,6 +926,28 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	// Check if we have any remaining dependency cycles. If there are any
 	// objects left in the pending list, then it must be due to a cycle.
 	if elem := ds.pending.Front(); elem != nil {
+		// Temporary diagnostics: callbacks point from a dependency to its
+		// waiters, so invert those edges to show what each pending object needs.
+		dependencies := make(map[objectID][]objectID)
+		for _, dependency := range ds.objectsByID {
+			if dependency == nil {
+				continue
+			}
+			for _, callback := range dependency.callbacks {
+				if waiter := callback.source(); waiter != nil {
+					dependencies[waiter.id] = append(dependencies[waiter.id], dependency.id)
+				}
+			}
+		}
+		leaves := make(map[objectID]bool)
+		for leaf := ds.leaves.Front(); leaf != nil; leaf = leaf.Next() {
+			leaves[leaf.ods.id] = true
+		}
+		fmt.Fprintf(os.Stderr, "state decode incomplete: objects=%d pending=%d leaves=%d deferred=%d\n", len(ds.objectsByID), ds.pending.Len(), len(leaves), len(ds.deferred))
+		for pending := ds.pending.Front(); pending != nil; pending = pending.Next() {
+			object := pending.ods
+			fmt.Fprintf(os.Stderr, "state pending: id=%d type=%v blocked_by=%d in_leaves=%t callbacks=%d waits_for=%v\n", object.id, object.obj.Type(), object.blockedBy, leaves[object.id], len(object.callbacks), dependencies[object.id])
+		}
 		// This must be the result of a dependency cycle.
 		cycle := elem.ods.findCycle()
 		var buf bytes.Buffer

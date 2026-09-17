@@ -4,7 +4,6 @@ package sandbox
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"runtime"
@@ -30,20 +29,8 @@ func runGuest() (err error) {
 			err = fmt.Errorf("sandbox guest panicked: %v", value)
 		}
 	}()
-	var stat unix.Stat_t
-	if err := unix.Fstat(3, &stat); err != nil {
-		return err
-	}
-	if stat.Size != 2*imageBytes {
-		return fmt.Errorf("invalid sandbox image size %d", stat.Size)
-	}
-	mem, err := unix.Mmap(3, 0, 2*imageBytes, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
-	if err != nil {
-		return err
-	}
-	defer unix.Munmap(mem)
 	defer unix.Close(3)
-	data, err := stateImage(append([]byte(nil), mem[:imageBytes]...))
+	data, err := readStateImage(3, 0)
 	if err != nil {
 		return err
 	}
@@ -54,11 +41,10 @@ func runGuest() (err error) {
 		return err
 	}
 	fn()
-	n, _, err := graph.Save(ctx, mem[imageBytes+8:], &fn)
+	_, err = writeStateImage(3, int64(len(data))+8, &graph, &fn)
 	if err != nil {
 		return err
 	}
-	binary.LittleEndian.PutUint64(mem[imageBytes:], uint64(n))
 	runtime.KeepAlive(&graph)
 	return nil
 }

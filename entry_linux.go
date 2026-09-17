@@ -4,13 +4,10 @@ package sandbox
 
 import (
 	"debug/elf"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"runtime"
 )
-
-const imageBytes = 16 << 20
 
 func guestMain() (uintptr, error) {
 	path, err := os.Executable()
@@ -39,16 +36,4 @@ func guestMain() (uintptr, error) {
 		}
 	}
 	return 0, fmt.Errorf("sandbox needs a main.main ELF symbol with at least %d bytes", jumpSize)
-}
-
-// A zero length means the sender has not published a completed state image.
-func stateImage(mem []byte) ([]byte, error) {
-	if len(mem) < 8 {
-		return nil, fmt.Errorf("truncated state image")
-	}
-	n := binary.LittleEndian.Uint64(mem)
-	if n == 0 || n > uint64(len(mem)-8) {
-		return nil, fmt.Errorf("invalid or incomplete state image length %d", n)
-	}
-	return mem[8 : 8+int(n)], nil
 }
