@@ -38,6 +38,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Configure Go environment
+        if: ${{ matrix.platform.arch == 'amd64' }}
         run: |
           echo "GOPATH=${RUNNER_TEMP}/go" >> "$GITHUB_ENV"
           echo "GOBIN=${RUNNER_TEMP}/go/bin" >> "$GITHUB_ENV"
@@ -82,6 +83,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Configure Go environment
+        if: ${{ matrix.arch == 'amd64' }}
         run: |
           echo "GOPATH=${RUNNER_TEMP}/go" >> "$GITHUB_ENV"
           echo "GOBIN=${RUNNER_TEMP}/go/bin" >> "$GITHUB_ENV"
@@ -89,6 +91,13 @@ jobs:
           echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
           echo "TEST_BIN=${RUNNER_TEMP}/sandbox-test" >> "$GITHUB_ENV"
           echo "SANDBOX_TEST_LIBRARY=${RUNNER_TEMP}/sandbox-test/sentrylib.so" >> "$GITHUB_ENV"
+      - name: Configure ARM64 test executables
+        if: ${{ matrix.arch == 'arm64' }}
+        run: |
+          test_bin=$(mktemp -d /tmp/sandbox-test.XXXXXX)
+          chmod 755 "$test_bin"
+          echo "TEST_BIN=$test_bin" >> "$GITHUB_ENV"
+          echo "SANDBOX_TEST_LIBRARY=$test_bin/sentrylib.so" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
