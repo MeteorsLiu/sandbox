@@ -366,7 +366,7 @@ func (d *importer) construct(def *definition, resolve func(uint32) reflect.Type)
 		for i, f := range def.fields {
 			fields[i] = reflect.StructField{Name: f.name, PkgPath: f.pkg, Tag: reflect.StructTag(f.tag), Anonymous: f.anonymous, Type: resolve(f.typ)}
 		}
-		return d.ctx.StructOf(fields)
+		return structOf(fields)
 	case reflect.Interface:
 		methods := make([]reflect.Method, len(def.methods))
 		for i, m := range def.methods {
@@ -433,7 +433,7 @@ func (d *importer) mock(id uint32) reflect.Type {
 		for i, f := range def.fields {
 			fields[i] = reflect.StructField{Name: f.name, PkgPath: f.pkg, Tag: reflect.StructTag(f.tag), Type: d.mock(f.typ)}
 		}
-		typ = d.ctx.StructOf(fields)
+		typ = structOf(fields)
 	case reflect.Array:
 		typ = reflect.ArrayOf(def.length, d.mock(def.elem))
 	default:

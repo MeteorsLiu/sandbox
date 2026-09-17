@@ -300,7 +300,7 @@ func (ds *decodeState) waitObject(ods *objectDecodeState, encoded object, callba
 // the decode-side equivalent to traverse in encode.go.
 //
 // For the purposes of this function, a child object is either a field within a
-// struct or an array element, with one such indirection per element in
+// struct, an array element, or an array range, with one indirection per element in
 // path. The returned value may be an unexported field, so it may not be
 // directly assignable. See decode_unsafe.go.
 func walkChild(path []dot, obj reflect.Value) reflect.Value {
@@ -317,6 +317,17 @@ func walkChild(path []dot, obj reflect.Value) reflect.Value {
 				Failf("next component in child path is an array index, but the current object is not an array. Path: %v, current obj: %#v", path, obj)
 			}
 			obj = obj.Index(int(pc))
+		case arrayRange:
+			if obj.Kind() != reflect.Array {
+				Failf("array range path requires an array, got %v", obj.Type())
+			}
+			if pc.start > uintValue(obj.Len()) || pc.length > uintValue(obj.Len())-pc.start {
+				Failf("array range start=%d length=%d exceeds %v", pc.start, pc.length, obj.Type())
+			}
+			end := int(pc.start + pc.length)
+			view := reflectValueRWSlice3(obj, int(pc.start), end, end)
+			typ := reflect.ArrayOf(int(pc.length), obj.Type().Elem())
+			obj = view.Convert(reflect.PointerTo(typ)).Elem()
 		default:
 			panic("unreachable: switch should be exhaustive")
 		}

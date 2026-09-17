@@ -420,7 +420,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 }
 
 // traverse searches for a target object within a root object, where the target
-// object is a struct field or array element within root, with potentially
+// object is a struct field, array element, or array range within root, with potentially
 // multiple intervening types. traverse returns the set of field or element
 // traversals required to reach the target.
 //
@@ -453,6 +453,23 @@ func traverse(rootType, targetType reflect.Type, rootAddr, targetAddr uintptr) [
 		Failf("no field in root type %v contains target type %v", rootType, targetType)
 
 	case reflect.Array:
+		if targetType.Kind() == reflect.Array && targetType.Elem() == rootType.Elem() {
+			// A slice such as a[18:] names a range of a's backing array,
+			// not the single element a[18]. Preserve it as a shared view.
+			elemSize := rootType.Elem().Size()
+			offset := targetAddr - rootAddr
+			if targetAddr < rootAddr || elemSize == 0 && offset != 0 || elemSize != 0 && offset%elemSize != 0 {
+				Failf("unaligned array range of type %v @%x within %v @%x", targetType, targetAddr, rootType, rootAddr)
+			}
+			var start uintptr
+			if elemSize != 0 {
+				start = offset / elemSize
+			}
+			if start > uintptr(rootType.Len()) || uintptr(targetType.Len()) > uintptr(rootType.Len())-start {
+				Failf("array range of type %v @%x exceeds %v @%x", targetType, targetAddr, rootType, rootAddr)
+			}
+			return []dot{arrayRange{start: uintValue(start), length: uintValue(targetType.Len())}}
+		}
 		// Since arrays have homogeneous types, all elements have the
 		// same size and we can compute where the target lives. This
 		// does not matter for the purpose of typing, but matters for
