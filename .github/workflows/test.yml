@@ -1,0 +1,120 @@
+name: Go Test
+
+on:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.module.name }} / ${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - {arch: amd64, runner: [qiniu, ubuntu-24.04]}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+        module:
+          - {name: sandbox, path: '.'}
+          - {name: sentry, path: sentry}
+    env:
+      CGO_ENABLED: '1'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure Go environment
+        run: |
+          echo "GOPATH=${RUNNER_TEMP}/go" >> "$GITHUB_ENV"
+          echo "GOBIN=${RUNNER_TEMP}/go/bin" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=${RUNNER_TEMP}/go/pkg/mod" >> "$GITHUB_ENV"
+          echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            sentry/go.sum
+      - name: Test with coverage
+        working-directory: ${{ matrix.module.path }}
+        run: go test -mod=readonly -v -timeout=10m -ldflags='-checklinkname=0 -s=false -w=false' -covermode=atomic -coverprofile="$GITHUB_WORKSPACE/coverage.out" ./...
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && hashFiles('coverage.out') != '' }}
+        uses: codecov/codecov-action@v5
+        with:
+          use_oidc: true
+          files: coverage.out
+          disable_search: true
+          flags: ${{ matrix.module.name }},${{ matrix.platform.arch }}
+          name: ${{ matrix.module.name }}-${{ matrix.platform.arch }}
+          fail_ci_if_error: true
+
+  integration:
+    name: Sentry integration / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: [qiniu, ubuntu-24.04]}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    env:
+      CGO_ENABLED: '1'
+      GOTOOLCHAIN: local
+      GLIBC_TUNABLES: glibc.pthread.rseq=0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure Go environment
+        run: |
+          echo "GOPATH=${RUNNER_TEMP}/go" >> "$GITHUB_ENV"
+          echo "GOBIN=${RUNNER_TEMP}/go/bin" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=${RUNNER_TEMP}/go/pkg/mod" >> "$GITHUB_ENV"
+          echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
+          echo "TEST_BIN=${RUNNER_TEMP}/sandbox-test" >> "$GITHUB_ENV"
+          echo "SANDBOX_TEST_LIBRARY=${RUNNER_TEMP}/sandbox-test/sentrylib.so" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            sentry/go.sum
+            testdata/go.sum
+            testdata/llar/go.sum
+      - name: Build Sentry and test executables
+        id: build
+        run: |
+          bash sentry/build-linux.sh "$TEST_BIN"
+          cd testdata
+          go test -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -c -o "$TEST_BIN/ixgo.test" ./ixgo
+          go build -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -o "$TEST_BIN/smoke" .
+          cd llar
+          go test -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -c -o "$TEST_BIN/llar.test" .
+      - name: Test ixgo round trips
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: testdata/ixgo
+        run: sudo env GLIBC_TUNABLES="$GLIBC_TUNABLES" SANDBOX_TEST_LIBRARY="$SANDBOX_TEST_LIBRARY" "$TEST_BIN/ixgo.test" -test.v -test.timeout=10m
+      - name: Test LLAR formulas
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: testdata/llar
+        run: sudo env GLIBC_TUNABLES="$GLIBC_TUNABLES" SANDBOX_TEST_LIBRARY="$SANDBOX_TEST_LIBRARY" "$TEST_BIN/llar.test" -test.v -test.timeout=10m
+      - name: Test sandbox smoke cases
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: testdata
+        run: sudo env GLIBC_TUNABLES="$GLIBC_TUNABLES" "$TEST_BIN/smoke"
