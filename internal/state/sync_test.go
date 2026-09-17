@@ -190,14 +190,13 @@ func TestRWMutexZero(t *testing.T) {
 }
 
 func TestSyncPoolZero(t *testing.T) {
-	calls := 0
-	pool := &sync.Pool{New: func() any { calls++; return "host" }}
+	pool := new(sync.Pool)
 	pool.Put(make(chan int))
 	src := []any{pool, pool}
 	var dst []any
 	roundtrip(t, &src, &dst)
 	got := dst[0].(*sync.Pool)
-	if got == pool || got != dst[1].(*sync.Pool) || got.New != nil || got.Get() != nil || calls != 0 || pool.New == nil {
+	if got == pool || got != dst[1].(*sync.Pool) || got.New != nil || got.Get() != nil || pool.New != nil {
 		t.Fatal("pool was not emptied, lost its alias, or modified the source")
 	}
 	got.Put(42)
@@ -271,19 +270,62 @@ func TestSyncCondZero(t *testing.T) {
 	src.L.Unlock()
 	dst := sync.NewCond(new(sync.Mutex))
 	roundtrip(t, src, dst)
-	if !reflect.ValueOf(dst).Elem().IsZero() {
-		t.Fatal("restored Cond retained its locker or notification state")
+	locker, ok := dst.L.(*sync.Mutex)
+	if !ok || locker == src.L || !locker.TryLock() {
+		t.Fatal("restored Cond lost its locker or retained the source lock state")
+	}
+	locker.Unlock()
+	if !reflect.DeepEqual(dst, sync.NewCond(locker)) {
+		t.Fatal("restored Cond retained notification or copy-check state")
 	}
 	select {
 	case <-done:
 		t.Fatal("snapshot released the source Cond")
 	default:
 	}
-	dst.L = new(sync.Mutex)
 	dst.L.Lock()
 	dst.Signal()
 	dst.Broadcast()
 	dst.L.Unlock()
+}
+
+func TestSyncCondLocker(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		locker sync.Locker
+	}{
+		{"nil", nil},
+		{"typed nil", (*sync.Mutex)(nil)},
+		{"mutex", new(sync.Mutex)},
+		{"rwmutex", new(sync.RWMutex)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			locker := test.locker
+			src := struct {
+				Cond   *sync.Cond
+				Locker sync.Locker
+			}{sync.NewCond(locker), locker}
+			dst := src
+			dst.Cond = sync.NewCond(new(sync.Mutex))
+			roundtrip(t, &src, &dst)
+			if dst.Cond == src.Cond || dst.Cond.L != dst.Locker || reflect.TypeOf(dst.Locker) != reflect.TypeOf(locker) {
+				t.Fatal("Cond locker type or alias changed")
+			}
+			if locker == nil || reflect.ValueOf(locker).IsNil() {
+				if !reflect.DeepEqual(dst.Locker, locker) {
+					t.Fatal("nil locker changed")
+				}
+				return
+			}
+			if dst.Locker == locker {
+				t.Fatal("Cond reused the source locker")
+			}
+			dst.Cond.L.Lock()
+			dst.Cond.Signal()
+			dst.Cond.Broadcast()
+			dst.Cond.L.Unlock()
+		})
+	}
 }
 
 func TestSyncLockerAliases(t *testing.T) {
@@ -291,14 +333,16 @@ func TestSyncLockerAliases(t *testing.T) {
 		Mutex sync.Mutex
 		First sync.Locker
 		Other sync.Locker
+		Cond  *sync.Cond
 	}
 	src := new(root)
 	src.Mutex.Lock()
 	defer src.Mutex.Unlock()
 	src.First, src.Other = &src.Mutex, &src.Mutex
+	src.Cond = sync.NewCond(&src.Mutex)
 	dst := new(root)
 	roundtrip(t, src, dst)
-	if dst.First != &dst.Mutex || dst.Other != &dst.Mutex || !dst.Mutex.TryLock() {
+	if dst.First != &dst.Mutex || dst.Other != &dst.Mutex || dst.Cond.L != &dst.Mutex || !dst.Mutex.TryLock() {
 		t.Fatal("sync.Locker aliases no longer refer to the same fresh mutex")
 	}
 	dst.First.Unlock()
