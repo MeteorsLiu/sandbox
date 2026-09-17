@@ -20,6 +20,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"sync"
 	"unsafe"
 
 	"github.com/goplus/ixgo"
@@ -555,6 +556,10 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *object) {
 		localObj := reflect.New(obj.Type())
 		localObj.Elem().Set(obj)
 		obj = localObj.Elem()
+	}
+	if obj.Type() == reflect.TypeFor[sync.Map]() {
+		es.encodeSyncMap(obj.Addr().Interface().(*sync.Map), s)
+		return
 	}
 
 	// Look the type up in the database.

@@ -101,7 +101,9 @@ func (e *ErrState) Unwrap() error {
 // rejected. Legacy timer modes without a channel timer link cannot be detected.
 // The caller must keep the source graph quiescent throughout Save.
 // Atomic wrappers preserve their values; atomic.Pointer[T] targets are relocated
-// with the object graph. Structs from sync except sync.Map are not traversed:
+// with the object graph. sync.Map saves entries through Range and rebuilds them
+// through Store; keys and values share the same object graph. Its internal hash
+// trie and synchronization state are not copied. Other sync structs are not traversed:
 // they become zero values, including Once's done flag, WaitGroup's counter,
 // Cond.L and Pool.New. Their waiters and synchronization state are not copied.
 // reflect.Value preserves its represented type, value and addressability.
