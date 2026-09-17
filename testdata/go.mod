@@ -12,7 +12,6 @@ require (
 	github.com/goplus/reflectx v1.7.8 // indirect
 	github.com/visualfc/funcval v0.1.5 // indirect
 	github.com/visualfc/gid v0.3.5 // indirect
-	github.com/visualfc/goembed v0.3.4 // indirect
 	github.com/visualfc/xtype v0.3.3 // indirect
 	golang.org/x/arch v0.28.0 // indirect
 	golang.org/x/mod v0.39.0 // indirect
