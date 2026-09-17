@@ -3,8 +3,8 @@
 
 // Package reflectxtype transfers dynamic reflectx type definitions. It requires
 // Go 1.26.6 and -ldflags=-checklinkname=0. Static dependencies require the same
-// executable and loaded type modules. Concrete method implementations are not
-// transferred; types containing them are rejected.
+// executable and loaded type modules. Method definitions travel with types;
+// callers transfer their functions separately and install the restored callbacks.
 package reflectxtype
 
 import (
@@ -23,12 +23,16 @@ import (
 // Data crosses the process boundary. IDs include referenced system types;
 // system references use the same static locations as the reflecttype codec.
 type Snapshot struct {
-	Data []byte
-	IDs  map[reflect.Type]uint32
+	Data    []byte
+	IDs     map[reflect.Type]uint32
+	Methods []reflect.Value
 }
 
 type ReflectType struct {
-	types []reflect.Type
+	types       []reflect.Type
+	definitions []definition
+	ctx         *reflectx.Context
+	methodCount int
 }
 
 // Resolve returns a completed local type. Concurrent Resolve calls are safe.
@@ -94,18 +98,20 @@ func Export() (*Snapshot, error) {
 		data = binary.AppendUvarint(data, uint64(len(entry)))
 		data = append(data, entry...)
 	}
-	return &Snapshot{Data: data, IDs: e.ids}, nil
+	return &Snapshot{Data: data, IDs: e.ids, Methods: e.methods}, nil
 }
 
 // Zero denotes an executable type location, primitive kinds denote builtins,
 // and dynamic|kind denotes a definition with identity and layout metadata.
 const dynamic = 1 << 8
+const concreteMethods = 1 << 9
 
 type exporter struct {
 	ids      map[reflect.Type]uint32
 	entries  [][]byte
 	needed   map[reflect.Type]bool
 	visiting map[reflect.Type]bool
+	methods  []reflect.Value
 }
 
 func (e *exporter) requiresReflectx(typ reflect.Type) bool {
@@ -162,10 +168,16 @@ func (e *exporter) encode(typ reflect.Type) ([]byte, error) {
 		data = binary.AppendUvarint(data, uint64(location.module))
 		return binary.AppendUvarint(data, location.offset), nil
 	}
-	if kind != reflect.Interface && (reflectx.NumMethodX(typ) != 0 || reflectx.NumMethodX(reflectx.PtrTo(typ)) != 0) {
-		return nil, fmt.Errorf("concrete method implementations are not supported")
+	var methods []reflectx.Method
+	var functions []reflect.Value
+	if kind != reflect.Interface && (kind != reflect.Pointer || typ.Name() != "") {
+		methods, functions = concreteMethodSet(typ)
 	}
-	data := binary.AppendUvarint(nil, dynamic|uint64(kind))
+	tag := dynamic | uint64(kind)
+	if len(methods) != 0 {
+		tag |= concreteMethods
+	}
+	data := binary.AppendUvarint(nil, tag)
 	data = appendString(data, typ.Name())
 	data = appendString(data, typ.PkgPath())
 	data = binary.AppendUvarint(data, uint64(typ.Size()))
@@ -235,6 +247,19 @@ func (e *exporter) encode(typ reflect.Type) ([]byte, error) {
 	default:
 		if builtinTypes[kind] == nil {
 			return nil, fmt.Errorf("unsupported kind %v", kind)
+		}
+	}
+	if len(methods) != 0 {
+		data = binary.AppendUvarint(data, uint64(len(methods)))
+		for i, method := range methods {
+			data = appendString(data, method.Name)
+			data = appendString(data, method.PkgPath)
+			data = appendFlag(data, method.Pointer)
+			if err := appendType(method.Type); err != nil {
+				return nil, err
+			}
+			e.methods = append(e.methods, functions[i])
+			data = binary.AppendUvarint(data, uint64(len(e.methods)))
 		}
 	}
 	return data, nil

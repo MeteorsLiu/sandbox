@@ -336,27 +336,109 @@ func TestConcurrentOpen(t *testing.T) {
 	group.Wait()
 }
 
-func TestRejectConcreteMethods(t *testing.T) {
-	// Isolate these caches: later exports must not inherit unsupported fixtures.
+func TestConcreteMethods(t *testing.T) {
+	// Keep method-slot allocations and fixture caches in a separate process.
 	if os.Getenv("SANDBOX_REFLECTXTYPE_METHOD_CHILD") == "1" {
 		for _, pointer := range []bool{false, true} {
 			base := reflectx.NamedTypeOf("example/methods", "T", reflect.TypeFor[int]())
 			typ := reflectx.NewMethodSet(base, 1, 1)
-			method := reflectx.MakeMethod("hidden", "example/methods", pointer, reflect.TypeFor[func()](), func([]reflect.Value) []reflect.Value { return nil })
+			callback := func([]reflect.Value) []reflect.Value { return []reflect.Value{reflect.ValueOf(42)} }
+			method := reflectx.MakeMethod("hidden", "example/methods", pointer, reflect.TypeFor[func() int](), callback)
 			if err := reflectx.SetMethodSet(typ, []reflectx.Method{method}, false); err != nil {
 				t.Fatal(err)
 			}
-			e := exporter{ids: make(map[reflect.Type]uint32)}
-			if _, err := e.intern(typ); err == nil || !strings.Contains(err.Error(), "concrete method") {
-				t.Fatalf("export: %v", err)
+			reflect.SliceOf(typ)
+			snapshot, err := Export()
+			if err != nil {
+				t.Fatal(err)
+			}
+			table, err := Open(snapshot.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callbacks := make([]func([]reflect.Value) []reflect.Value, table.MethodCount())
+			for i := range callbacks {
+				callbacks[i] = callback
+			}
+			if err := table.SetMethods(callbacks); err != nil {
+				t.Fatal(err)
+			}
+			got, err := table.Resolve(snapshot.IDs[typ])
+			if err != nil {
+				t.Fatal(err)
+			}
+			methods, functions := concreteMethodSet(got)
+			if len(methods) != 1 || methods[0].Name != "hidden" || methods[0].PkgPath != "example/methods" || methods[0].Pointer != pointer {
+				t.Fatalf("method metadata: %+v", methods)
+			}
+			receiver := reflect.New(got)
+			if !pointer {
+				receiver = receiver.Elem()
+			}
+			if functions[0].Call([]reflect.Value{receiver})[0].Int() != 42 {
+				t.Fatal("restored method returned wrong value")
 			}
 		}
 		return
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestRejectConcreteMethods$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestConcreteMethods$")
 	cmd.Env = append(os.Environ(), "SANDBOX_REFLECTXTYPE_METHOD_CHILD=1")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("method fixture: %v\n%s", err, output)
+	}
+}
+
+func TestMethodFunctionIndices(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		indices []uint64
+		valid   bool
+	}{
+		{"record end", []uint64{1}, true},
+		{"out of order", []uint64{2, 1}, true},
+		{"zero", []uint64{0}, false},
+		{"out of range", []uint64{2}, false},
+		{"duplicate", []uint64{1, 1}, false},
+		{"overflow", []uint64{^uint64(0)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := binary.AppendUvarint(nil, dynamic|concreteMethods|uint64(reflect.Int))
+			owner = appendString(owner, "T")
+			owner = appendString(owner, "example/methodindices")
+			owner = binary.AppendUvarint(owner, uint64(reflect.TypeFor[int]().Size()))
+			owner = binary.AppendUvarint(owner, uint64(reflect.TypeFor[int]().Align()))
+			owner = appendFlag(owner, true)
+			owner = binary.AppendUvarint(owner, uint64(len(tc.indices)))
+			for i, index := range tc.indices {
+				owner = appendString(owner, fmt.Sprintf("M%d", i))
+				owner = appendString(owner, "")
+				owner = appendFlag(owner, false)
+				owner = binary.AppendUvarint(owner, 2)
+				owner = binary.AppendUvarint(owner, index)
+			}
+			signature := binary.AppendUvarint(nil, dynamic|uint64(reflect.Func))
+			signature = appendString(signature, "")
+			signature = appendString(signature, "")
+			signature = binary.AppendUvarint(signature, uint64(reflect.TypeFor[func()]().Size()))
+			signature = binary.AppendUvarint(signature, uint64(reflect.TypeFor[func()]().Align()))
+			signature = append(signature, 0, 0, 0, 0) // Comparable, variadic, inputs, outputs.
+			data := binary.AppendUvarint(nil, 2)
+			for _, entry := range [][]byte{owner, signature} {
+				data = binary.AppendUvarint(data, uint64(len(entry)))
+				data = append(data, entry...)
+			}
+			table, err := Open(data)
+			if tc.valid {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if table.MethodCount() != len(tc.indices) {
+					t.Fatal("incorrect callback count")
+				}
+			} else if err == nil || table != nil || !strings.Contains(err.Error(), "invalid method function index") {
+				t.Fatalf("Open = %v, %v", table, err)
+			}
+		})
 	}
 }
 

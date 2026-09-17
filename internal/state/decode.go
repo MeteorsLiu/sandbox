@@ -772,6 +772,29 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	} else if root.obj.Type() != obj.Type() || root.obj.Addr().Pointer() != obj.Addr().Pointer() {
 		Failf("root object changed during round trip")
 	}
+	if ds.reflectx != nil && ds.reflectx.MethodCount() != 0 {
+		encoded, err := ds.r.get()
+		if err != nil {
+			Failf("method callbacks: %w", err)
+		}
+		methods, ok := encoded.(*arrayValue)
+		if !ok || len(methods.Contents) != ds.reflectx.MethodCount() {
+			Failf("method callback count does not match type table")
+		}
+		callbacks := make([]func([]reflect.Value) []reflect.Value, len(methods.Contents))
+		for i, record := range methods.Contents {
+			fn, ok := record.(*functionValue)
+			if !ok {
+				Failf("invalid method callback %T", record)
+			}
+			ds.decodeFunction(reflect.ValueOf(&callbacks[i]).Elem(), fn)
+		}
+		// Allocate closure storage first, install the method table, then fill
+		// the environments. Interfaces decoded below see the final Ifn entries.
+		if err := ds.reflectx.SetMethods(callbacks); err != nil {
+			Failf("restore reflectx methods: %w", err)
+		}
+	}
 
 	// Read the number of objects.
 	numObjects, isObject, err := readHeader(&ds.r)

@@ -871,14 +871,58 @@ func (es *encodeState) Save(obj reflect.Value) {
 
 	// Encode the graph.
 	var oes *objectEncodeState
+	var snapshot *reflecttype.Snapshot
+	var extended *reflectxtype.Snapshot
+	methodRecords := make(map[uintptr]object)
+	var methods arrayValue
 	if err := safely(func() {
-		for oes = es.deferred.Front(); oes != nil; oes = es.deferred.Front() {
-			// Remove and encode the object. Note that as a result
-			// of this encoding, the object may be enqueued on the
-			// deferred list yet again. That's expected, and why it
-			// is removed first.
-			es.deferred.Remove(oes)
-			es.encodeObject(oes.obj, oes.how, &oes.encoded)
+		for {
+			for oes = es.deferred.Front(); oes != nil; oes = es.deferred.Front() {
+				// Remove and encode the object. Note that as a result
+				// of this encoding, the object may be enqueued on the
+				// deferred list yet again. That's expected, and why it
+				// is removed first.
+				es.deferred.Remove(oes)
+				es.encodeObject(oes.obj, oes.how, &oes.encoded)
+			}
+			if len(es.reflected) == 0 {
+				break
+			}
+			var err error
+			snapshot, err = reflecttype.Export()
+			if err != nil {
+				Failf("export reflect types: %w", err)
+			}
+			needExtended := extended != nil
+			for typ := range es.reflected {
+				if snapshot.IDs[typ] == 0 {
+					needExtended = true
+					break
+				}
+			}
+			if !needExtended {
+				break
+			}
+			extended, err = reflectxtype.Export()
+			if err != nil {
+				Failf("export reflectx types: %w", err)
+			}
+			methods.Contents = make([]object, len(extended.Methods))
+			for i, fn := range extended.Methods {
+				callback := makeFuncCallback(fn)
+				address := callback.Addr().Pointer()
+				record, ok := methodRecords[address]
+				if !ok {
+					es.encodeFunction(callback, &record)
+					methodRecords[address] = record
+				}
+				methods.Contents[i] = record
+			}
+			// Method environments can expose more types and methods. Finish their
+			// objects before assigning the final type IDs for the entire graph.
+			if es.deferred.Front() == nil {
+				break
+			}
 		}
 	}); err != nil {
 		// Report the type without copying live synchronization state.
@@ -896,22 +940,13 @@ func (es *encodeState) Save(obj reflect.Value) {
 	// Types synthesized while walking slices or native closure storage now
 	// exist in the caches. Assign their final snapshot IDs before writing values.
 	var typeData, reflectxData []byte
-	if len(es.reflected) != 0 {
-		snapshot, err := reflecttype.Export()
-		if err != nil {
-			Failf("export reflect types: %w", err)
+	if snapshot != nil {
+		if extended != nil {
+			reflectxData = extended.Data
 		}
-		var extended *reflectxtype.Snapshot
 		for typ, ref := range es.reflected {
 			id, ok := snapshot.IDs[typ]
 			if !ok {
-				if extended == nil {
-					extended, err = reflectxtype.Export()
-					if err != nil {
-						Failf("export reflectx types: %w", err)
-					}
-					reflectxData = extended.Data
-				}
 				id, ok = extended.IDs[typ]
 				if !ok {
 					Failf("type %v is missing from the reflect and reflectx snapshots", typ)
@@ -930,6 +965,11 @@ func (es *encodeState) Save(obj reflect.Value) {
 		Failf("error writing reflectx type table header: %w", err)
 	}
 	es.w.writeBytes(reflectxData)
+	if len(methods.Contents) != 0 {
+		if err := es.w.put(&methods); err != nil {
+			Failf("writing method callbacks: %w", err)
+		}
+	}
 
 	// Write the header with the number of objects.
 	if err := writeHeader(&es.w, uint64(len(es.pending)), true); err != nil {
