@@ -367,7 +367,7 @@ func TestConcreteMethods(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			methods, functions := concreteMethodSet(got)
+			methods, functions, _ := concreteMethodSet(got)
 			if len(methods) != 1 || methods[0].Name != "hidden" || methods[0].PkgPath != "example/methods" || methods[0].Pointer != pointer {
 				t.Fatalf("method metadata: %+v", methods)
 			}
@@ -413,6 +413,7 @@ func TestMethodFunctionIndices(t *testing.T) {
 				owner = appendString(owner, fmt.Sprintf("M%d", i))
 				owner = appendString(owner, "")
 				owner = appendFlag(owner, false)
+				owner = appendFlag(owner, true)
 				owner = binary.AppendUvarint(owner, 2)
 				owner = binary.AppendUvarint(owner, index)
 			}

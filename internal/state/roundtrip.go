@@ -41,6 +41,7 @@ func (s *State) Load(ctx context.Context, mem []byte, rootPtr any) (Stats, error
 		if s.saved != nil {
 			check := newDecodeState(ctx, mem)
 			check.native = s.saved.native
+			check.reflectxSnapshot = s.saved.reflectxSnapshot
 			for id, saved := range s.saved.pending {
 				value := reflect.New(saved.obj.Type()).Elem()
 				if saved.how == encodeMapAsValue {
@@ -67,6 +68,7 @@ func (s *State) Load(ctx context.Context, mem []byte, rootPtr any) (Stats, error
 func (es *encodeState) decoder(ctx context.Context, mem []byte) *decodeState {
 	ds := newDecodeState(ctx, mem)
 	ds.native = es.native
+	ds.reflectxSnapshot = es.reflectxSnapshot
 	for id, saved := range es.pending {
 		value := saved.obj
 		if saved.how == encodeChannelAsValue {
@@ -88,6 +90,7 @@ func (es *encodeState) decoder(ctx context.Context, mem []byte) *decodeState {
 func (ds *decodeState) encoder(ctx context.Context, mem []byte) *encodeState {
 	es := newEncodeState(ctx, mem)
 	es.native = ds.native
+	es.reflectx = ds.reflectx
 	es.lastID = objectID(len(ds.objectsByID))
 	for _, decoded := range ds.objectsByID {
 		if decoded == nil {

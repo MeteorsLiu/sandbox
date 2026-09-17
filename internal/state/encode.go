@@ -75,7 +75,9 @@ type encodeState struct {
 	// types is the type database.
 	types typeEncodeDatabase
 
-	reflected map[reflect.Type]*reflectedType
+	reflected        map[reflect.Type]*reflectedType
+	reflectx         *reflectxtype.ReflectType
+	reflectxSnapshot *reflectxtype.Snapshot
 
 	native nativeState
 
@@ -903,7 +905,11 @@ func (es *encodeState) Save(obj reflect.Value) {
 			if !needExtended {
 				break
 			}
-			extended, err = reflectxtype.Export()
+			if es.reflectx != nil {
+				extended, err = es.reflectx.Export()
+			} else {
+				extended, err = reflectxtype.Export()
+			}
 			if err != nil {
 				Failf("export reflectx types: %w", err)
 			}
@@ -943,6 +949,7 @@ func (es *encodeState) Save(obj reflect.Value) {
 	if snapshot != nil {
 		if extended != nil {
 			reflectxData = extended.Data
+			es.reflectxSnapshot = extended
 		}
 		for typ, ref := range es.reflected {
 			id, ok := snapshot.IDs[typ]

@@ -27,22 +27,33 @@ func resolveMethodName(unsafe.Pointer, int32) unsafe.Pointer
 //go:linkname methodPackage reflect.pkgPath
 func methodPackage(struct{ bytes *byte }) string
 
-func concreteMethodSet(typ reflect.Type) ([]reflectx.Method, []reflect.Value) {
+//go:linkname methodText reflect.resolveTextOff
+func methodText(unsafe.Pointer, int32) unsafe.Pointer
+
+//go:linkname zeroMethod github.com/goplus/reflectx.zeroIfn
+var zeroMethod unsafe.Pointer
+
+func concreteMethodSet(typ reflect.Type) ([]reflectx.Method, []reflect.Value, []bool) {
 	var methods []reflectx.Method
 	var functions []reflect.Value
 	type identity struct{ name, pkg string }
 	values := make(map[identity]bool)
+	interfaces := make(map[identity]bool)
 	for _, receiver := range []reflect.Type{typ, reflectx.PtrTo(typ)} {
 		pointer := receiver != typ
+		rt := (*[2]unsafe.Pointer)(unsafe.Pointer(&receiver))[1]
+		raw := runtimeMethods(rt)
 		for i := 0; i < reflectx.NumMethodX(receiver); i++ {
 			method := reflectx.MethodX(receiver, i)
 			pkg := method.PkgPath
 			if !token.IsExported(method.Name) {
-				rt := (*[2]unsafe.Pointer)(unsafe.Pointer(&receiver))[1]
-				name := resolveMethodName(rt, runtimeMethods(rt)[i].name)
+				name := resolveMethodName(rt, raw[i].name)
 				pkg = methodPackage(struct{ bytes *byte }{(*byte)(name)})
 			}
 			key := identity{method.Name, pkg}
+			if pointer {
+				interfaces[key] = methodText(rt, raw[i].ifn) != zeroMethod
+			}
 			if pointer && values[key] {
 				continue
 			}
@@ -58,7 +69,11 @@ func concreteMethodSet(typ reflect.Type) ([]reflectx.Method, []reflect.Value) {
 			functions = append(functions, method.Func)
 		}
 	}
-	return methods, functions
+	hasInterface := make([]bool, len(methods))
+	for i, method := range methods {
+		hasInterface[i] = interfaces[identity{method.Name, method.PkgPath}]
+	}
+	return methods, functions, hasInterface
 }
 
 // MethodCount is the number of callbacks required by SetMethods, in the same
@@ -79,10 +94,18 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 		}
 	}()
 	for i, def := range t.definitions {
-		if def.kind == reflect.Interface || len(def.methods) == 0 {
+		if i < t.retained || def.kind == reflect.Interface || len(def.methods) == 0 {
 			continue
 		}
 		methods := make([]reflectx.Method, len(def.methods))
+		t.ctx.SetHasImethod(func(_ reflect.Type, m reflectx.Method) bool {
+			for _, method := range def.methods {
+				if method.name == m.Name && method.pkg == m.PkgPath {
+					return method.hasInterface
+				}
+			}
+			return false
+		})
 		for j, method := range def.methods {
 			methods[j] = reflectx.Method{Name: method.name, PkgPath: method.pkg, Pointer: method.pointer, Type: t.types[method.typ-1], Func: callbacks[method.function-1]}
 		}
@@ -90,5 +113,6 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 			return err
 		}
 	}
+	t.ctx.SetHasImethod(nil)
 	return nil
 }

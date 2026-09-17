@@ -166,8 +166,9 @@ type decodeState struct {
 	// types is the type database.
 	types typeDecodeDatabase
 
-	reflected *reflecttype.ReflectType
-	reflectx  *reflectxtype.ReflectType
+	reflected        *reflecttype.ReflectType
+	reflectx         *reflectxtype.ReflectType
+	reflectxSnapshot *reflectxtype.Snapshot
 
 	native    nativeState
 	functions []decodedFunction
@@ -777,7 +778,11 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		Failf("reflectx type table missing")
 	}
 	if data := ds.r.readBytes(typeBytes); len(data) != 0 {
-		ds.reflectx, err = reflectxtype.Open(data)
+		if ds.reflectxSnapshot != nil {
+			ds.reflectx, err = ds.reflectxSnapshot.Open(data)
+		} else {
+			ds.reflectx, err = reflectxtype.Open(data)
+		}
 		if err != nil {
 			Failf("import reflectx types: %w", err)
 		}
