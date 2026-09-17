@@ -32,23 +32,24 @@ int RunSandbox(char *config, int image_fd, uintptr_t main_pc, uintptr_t entry_pc
                  uintptr_t owner, inspect_fn inspect, char *message, size_t capacity);
 ```
 
-- `config` is a NUL-terminated JSON object containing `guest` (the executable's absolute guest path) and `mounts`. Sentry starts the executable with that path as `argv[0]` and no extra arguments. Mount entries contain `type`, optional `source`, `target` and optional `options` (an array of strings).
+- `config` is a NUL-terminated JSON object containing `guest` (the executable's absolute guest path), `mounts` and `env` (an array of `KEY=value` strings). Sentry starts the executable with that path as `argv[0]` and no extra arguments. Mount entries contain `type`, optional `source`, `target` and optional `options` (an array of strings). Environment entries are passed directly to the new process before runtime initialization; NUL is rejected. Missing, null or empty `env` gives an empty environment at this C entry. The Go host implements `Sandbox.Env == nil` inheritance by explicitly sending its own `os.Environ()`.
 - `image_fd` is a caller-owned descriptor imported as guest fd 3. The library does not interpret its contents. Guest fd 0, 1 and 2 are imported from host stdin, stdout and stderr.
 - `main_pc` is the guest virtual address to redirect; the caller supplies its `main.main` address. The caller must verify that the symbol contains at least 5 bytes on AMD64 or 4 bytes on ARM64. Before starting guest tasks, the library writes a relative branch into this private executable mapping using Sentry's existing memory manager.
 - `entry_pc` is the guest virtual address of the caller's private, non-capturing Go `func()` startup entry. It runs after Go package initialization and returns after exporting closure results. The caller owns ELF symbol resolution, guest code and value reconstruction. The library checks branch range and alignment; it does not interpret the closure image. Unsupported branch layouts fail before creating the guest.
 - `owner` is an opaque integer passed unchanged to `inspect`. A Go caller can use a `cgo.Handle` owned by its own runtime.
 - `inspect` is an optional synchronous callback. It receives a borrowed `syscall_event` containing the syscall number, name, six arguments and a memory mapping callback. The caller owns argument parsing and may change the registers directly. A null callback skips inspection setup. Guest pointer arguments must not be dereferenced in the host.
-- `message` is a writable error buffer of `capacity` bytes. A nonzero result indicates an error; zero means that the guest exited successfully.
+- `message` is a caller-owned writable error buffer of `capacity` bytes. For nonzero capacity, errors are truncated to at most `capacity - 1` bytes and NUL-terminated. No bytes are written at zero capacity. A nonzero result indicates an error; zero means that the guest exited successfully.
 
 All supplied strings, buffers and callback state must remain valid until `RunSandbox` returns. Each event, its name and its context handle are borrowed only for the duration of `inspect`. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
 
-The C entry name stays `RunSandbox`; releases use Go module version tags. In `sentry/v0.4.0`, the first string changes from an executable path to startup JSON; the C parameter types and syscall callback layout remain unchanged. The host and shared library must both use this contract. An older path is rejected as invalid JSON; an older backend cannot interpret the new configuration as an executable path. The earlier `sentry/v0.1.0` library also has an incompatible C signature and must not be loaded. Go module version selection does not validate a library loaded with `dlopen`.
+The C entry name stays `RunSandbox`; releases use Go module version tags. In `sentry/v0.4.0`, the first string changes from an executable path to startup JSON. In `sentry/v0.5.0`, the JSON gains `env`; the C parameter types and syscall callback layout remain unchanged. The v0.4.0 backend ignores `env`, so environment configuration requires v0.5.0 or later. An older path is rejected as invalid JSON; an older backend cannot interpret the new configuration as an executable path. The earlier `sentry/v0.1.0` library also has an incompatible C signature and must not be loaded. Go module version selection does not validate a library loaded with `dlopen`.
 
 Example startup configuration:
 
 ```json
 {
   "guest": "/opt/llar/llar",
+  "env": ["PATH=/usr/bin:/bin", "LANG=C"],
   "mounts": [
     {"type": "bind", "source": "/", "target": "/", "options": ["ro"]},
     {"type": "bind", "source": "/var/tmp/build", "target": "/work", "options": ["rw"]},
@@ -88,7 +89,7 @@ The hook is implemented in [platform_linux.go](platform_linux.go). It does not m
 
 ## Runtime Conditions
 
-Start the host with `GLIBC_TUNABLES=glibc.pthread.rseq=0`. Systrap's ptrace/seccomp initialization must be permitted by the surrounding environment. The guest uses UID/GID 1000 and working directory `/`; environment configuration is not exposed. Bind mounts use in-process LISAFS services for DirectFS. The executable, loader and shared libraries must be visible in the configured namespace. Filesystem permissions still apply in addition to mount flags.
+Start the host with `GLIBC_TUNABLES=glibc.pthread.rseq=0`. Systrap's ptrace/seccomp initialization must be permitted by the surrounding environment. The guest uses UID/GID 1000 and working directory `/`; its environment comes from the startup `env` array. Bind mounts use in-process LISAFS services for DirectFS. The executable, loader and shared libraries must be visible in the configured namespace. Filesystem permissions still apply in addition to mount flags.
 
 Native execution has been verified on Linux ARM64 with 4 KiB pages, including LLAR formula execution and syscall rewriting through the host callback. AMD64 builds are verified; native AMD64 Sentry execution and other page sizes still need validation. Both Go runtimes share the host OS address space and signal dispositions. Dependency separation through c-shared is not itself a memory protection boundary inside the host.
 

@@ -17,9 +17,14 @@ import (
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
-func runSentry(mounts []mount, executable string, imageFD int, mainPC, entryPC uintptr, inspect inspector) (err error) {
+func runSentry(mounts []mount, executable string, env []string, imageFD int, mainPC, entryPC uintptr, inspect inspector) (err error) {
 	if !path.IsAbs(executable) || strings.ContainsRune(executable, 0) {
 		return errors.New("guest executable must be an absolute path without NUL")
+	}
+	for _, entry := range env {
+		if strings.IndexByte(entry, 0) >= 0 {
+			return errors.New("guest environment contains NUL")
+		}
 	}
 	jump, err := entryJump(mainPC, entryPC)
 	if err != nil {
@@ -57,7 +62,7 @@ func runSentry(mounts []mount, executable string, imageFD int, mainPC, entryPC u
 	// reference above remains valid for cleanup on both success and failure.
 	mntns.IncRef()
 	tg, _, err := k.CreateProcess(kernel.CreateProcessArgs{
-		Filename: executable, Argv: []string{executable},
+		Filename: executable, Argv: []string{executable}, Envv: env,
 		WorkingDirectory: "/",
 		Credentials:      auth.NewUserCredentials(1000, 1000, nil, &auth.TaskCapabilities{}, k.RootUserNamespace()),
 		FDTable:          fdt, Umask: 0022, Limits: ls,

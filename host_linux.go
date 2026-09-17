@@ -135,10 +135,15 @@ func (s *Sandbox) Run(fn func()) error {
 			{Type: "proc", Target: "/proc"},
 		}
 	}
+	env := s.Env
+	if env == nil {
+		env = os.Environ()
+	}
 	config, err := json.Marshal(struct {
-		Guest  string  `json:"guest"`
-		Mounts []Mount `json:"mounts"`
-	}{executable, mounts})
+		Guest  string   `json:"guest"`
+		Mounts []Mount  `json:"mounts"`
+		Env    []string `json:"env"`
+	}{executable, mounts, env})
 	if err != nil {
 		return fmt.Errorf("sandbox configuration: %w", err)
 	}

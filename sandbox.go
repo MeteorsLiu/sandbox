@@ -20,7 +20,7 @@ type Mount struct {
 	Options []string `json:"options,omitempty"`
 }
 
-// Sandbox selects the shared library, guest mounts and synchronous inspector.
+// Sandbox selects the shared library, guest mounts, environment and inspector.
 // Library defaults to sentrylib.so beside the calling executable.
 type Sandbox struct {
 	Library string
@@ -28,6 +28,10 @@ type Sandbox struct {
 	// the list replaces all defaults, starting with a bind or tmpfs at /.
 	Mounts  []Mount
 	Inspect func(*Syscall)
+	// Env contains the guest's KEY=value environment entries. Nil inherits
+	// the host environment at each Run; a non-nil slice replaces it entirely.
+	// An empty non-nil slice starts the guest with no environment variables.
+	Env []string
 }
 
 // Run executes fn using the default Sandbox.
