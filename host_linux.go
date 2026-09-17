@@ -11,7 +11,6 @@ import "C"
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -101,29 +100,17 @@ func (s *Sandbox) Run(fn func()) error {
 		return err
 	}
 	entryPC := reflect.ValueOf(guestEntry).Pointer()
-	fd, err := unix.MemfdCreate("llar-sandbox", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	fd, err := newStateImage()
 	if err != nil {
 		return err
 	}
 	defer unix.Close(fd)
-	if err := unix.Ftruncate(fd, 2*imageBytes); err != nil {
-		return err
-	}
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
-		return err
-	}
-	mem, err := unix.Mmap(fd, 0, 2*imageBytes, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
-	if err != nil {
-		return err
-	}
-	defer unix.Munmap(mem)
 	var graph state.State
 	ctx := context.Background()
-	n, _, err := graph.Save(ctx, mem[8:imageBytes], &fn)
+	resultOffset, err := writeStateImage(fd, 0, &graph, &fn)
 	if err != nil {
 		return fmt.Errorf("sandbox export: %w", err)
 	}
-	binary.LittleEndian.PutUint64(mem, uint64(n))
 	defer runtime.KeepAlive(&graph)
 	executable, err := os.Executable()
 	if err != nil {
@@ -175,9 +162,7 @@ func (s *Sandbox) Run(fn func()) error {
 	if inspectionErr != nil {
 		return inspectionErr
 	}
-	// Never parse guest-writable memory while changing host objects.
-	output := append([]byte(nil), mem[imageBytes:]...)
-	data, err := stateImage(output)
+	data, err := readStateImage(fd, resultOffset)
 	if err != nil {
 		return fmt.Errorf("sandbox result: %w", err)
 	}

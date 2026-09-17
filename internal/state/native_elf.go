@@ -4,7 +4,6 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"fmt"
-	"net/url"
 	"os"
 	"reflect"
 	"runtime"
@@ -21,7 +20,7 @@ type nativeMetadata struct {
 	newobject          uint64
 	functions          map[uintptr]elf.Symbol
 	names              map[string]elf.Symbol
-	receivers          map[string]reflect.Type
+	methods            map[string]reflect.Type
 	segments           []elf.ProgHeader
 
 	mu      sync.Mutex // Protects layouts and the set of already scanned factories.
@@ -58,8 +57,8 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 	m := &nativeMetadata{
 		path: path, machine: f.Machine,
 		functions: make(map[uintptr]elf.Symbol), names: make(map[string]elf.Symbol),
-		receivers: make(map[string]reflect.Type),
-		layouts:   make(map[uintptr]reflect.Type), scanned: make(map[string]bool),
+		methods: make(map[string]reflect.Type),
+		layouts: make(map[uintptr]reflect.Type), scanned: make(map[string]bool),
 	}
 	var funcStart, funcEnd elf.Symbol
 	for _, s := range syms {
@@ -107,8 +106,9 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Typelinks usually keeps *T rather than T. Index the named element so
-	// both pkg.T.M-fm and pkg.(*T).M-fm can resolve their receiver directly.
+	// Typelinks usually keeps *T rather than T. Index both method sets using
+	// the compiler's symbol construction, including qualified private names.
+	seen := make(map[reflect.Type]bool)
 	for len(data) >= 4 {
 		offset := int32(binary.LittleEndian.Uint32(data))
 		typ := nativeReflectType(unsafe.Pointer(m.typeStart + uintptr(offset)))
@@ -116,17 +116,12 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 		if typ.Kind() == reflect.Pointer {
 			typ = typ.Elem()
 		}
-		if typ.Name() == "" {
+		if typ.Name() == "" || seen[typ] {
 			continue
 		}
-		key := typ.PkgPath() + "." + typ.Name()
-		if prev, ok := m.receivers[key]; ok && prev != typ {
-			// Function-local types can share PkgPath and Name with a
-			// package-level type. Do not select one by traversal order.
-			m.receivers[key] = nil
-		} else {
-			m.receivers[key] = typ
-		}
+		seen[typ] = true
+		m.indexMethods(typ)
+		m.indexMethods(reflect.PointerTo(typ))
 	}
 	return m, nil
 }
@@ -153,41 +148,23 @@ func (m *nativeMetadata) layout(pc uintptr, captureFree bool) (reflect.Type, err
 		return typ, nil
 	}
 	boundMethod := strings.HasSuffix(name, "-fm")
-	if i := strings.LastIndexByte(name, '.'); i >= 0 {
-		prefix := name[:i]
-		pkg, recv := "", prefix
-		if i := strings.LastIndexByte(prefix, '.'); i >= 0 {
-			pkg, recv = prefix[:i], prefix[i+1:]
+	receiver := m.methods[strings.TrimSuffix(name, "-fm")]
+	if boundMethod && receiver == nil {
+		return nil, fmt.Errorf("method %s has no unique static receiver type", name)
+	}
+	if receiver != nil {
+		// reflect.Type.Method creates a heap funcval for T.M or (*T).M.
+		// Its receiver is an argument; only M-fm captures a receiver.
+		layout := reflect.TypeFor[struct{ F uintptr }]()
+		if boundMethod {
+			// MethodValueType uses F + R, including zero-sized receivers.
+			layout = reflect.StructOf([]reflect.StructField{
+				{Name: "F", Type: reflect.TypeFor[uintptr]()},
+				{Name: "R", Type: receiver},
+			})
 		}
-		pkg, err := url.PathUnescape(pkg)
-		if err != nil {
-			return nil, fmt.Errorf("method %s package path: %w", name, err)
-		}
-		pointer := strings.HasPrefix(recv, "(*") && strings.HasSuffix(recv, ")")
-		if pointer {
-			recv = recv[2 : len(recv)-1]
-		}
-		typ, ok := m.receivers[pkg+"."+recv]
-		if boundMethod && (!ok || typ == nil) {
-			return nil, fmt.Errorf("method %s has no unique static receiver type", name)
-		}
-		if ok && typ != nil {
-			// reflect.Type.Method creates a heap funcval for T.M or (*T).M.
-			// Its receiver is an argument; only M-fm captures a receiver.
-			layout := reflect.TypeFor[struct{ F uintptr }]()
-			if boundMethod {
-				if pointer {
-					typ = reflect.PointerTo(typ)
-				}
-				// MethodValueType uses F + R, including zero-sized receivers.
-				layout = reflect.StructOf([]reflect.StructField{
-					{Name: "F", Type: reflect.TypeFor[uintptr]()},
-					{Name: "R", Type: typ},
-				})
-			}
-			m.layouts[pc] = layout
-			return layout, nil
-		}
+		m.layouts[pc] = layout
+		return layout, nil
 	}
 	// Try lexical parents, including inlining prefixes. For p.F.factory.func1,
 	// p.F.factory may not exist, while p.F contains the inlined allocation.

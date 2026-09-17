@@ -303,26 +303,46 @@ func TestReflectxStateNewProcess(t *testing.T) {
 	}
 }
 
-func TestReflectxStateRejectMethods(t *testing.T) {
+func TestReflectxStateMethods(t *testing.T) {
 	const childEnv = "SANDBOX_STATE_REFLECTX_METHOD"
 	if mode := os.Getenv(childEnv); mode != "" {
 		base := reflect.TypeFor[struct{ N int }]()
 		if mode == "named" {
 			base = reflectx.NamedTypeOf("example/method", "T", base)
 		}
-		typ := reflectx.NewMethodSet(base, 1, 1)
-		m := reflectx.MakeMethod("hidden", "example/method", true, reflect.TypeFor[func()](), func([]reflect.Value) []reflect.Value { return nil })
+		typ := reflectx.NewMethodSet(base, 0, 1)
+		m := reflectx.MakeMethod("hidden", "example/method", true, reflect.TypeFor[func() int](), func(args []reflect.Value) []reflect.Value {
+			field := args[0].Elem().Field(0)
+			field.SetInt(field.Int() + 1)
+			return []reflect.Value{reflect.ValueOf(int(field.Int()))}
+		})
 		if err := reflectx.SetMethodSet(typ, []reflectx.Method{m}, false); err != nil {
 			t.Fatal(err)
 		}
-		_, _, err := Save(context.Background(), make([]byte, 1<<20), &typ)
-		if err == nil || !strings.Contains(err.Error(), "concrete method implementations") {
-			t.Fatalf("unsupported method: %v", err)
+		var restored reflect.Type
+		roundtrip(t, &typ, &restored)
+		if restored == typ || restored.Name() != typ.Name() || restored.PkgPath() != typ.PkgPath() {
+			t.Fatal("method owner type was not reconstructed")
+		}
+		pointer := reflectx.PtrTo(restored)
+		method, ok := reflectx.MethodByName(pointer, "hidden")
+		if !ok || reflectx.NumMethodX(pointer) != 1 || reflectx.NumMethodX(restored) != 0 {
+			t.Fatal("pointer receiver method set was not preserved")
+		}
+		private := reflectx.InterfaceOf(nil, []reflect.Method{{Name: "hidden", PkgPath: "example/method", Type: reflect.TypeFor[func() int]()}})
+		other := reflectx.NewContext().InterfaceOf(nil, []reflect.Method{{Name: "hidden", PkgPath: "example/other", Type: reflect.TypeFor[func() int]()}})
+		if !pointer.Implements(private) || pointer.Implements(other) {
+			t.Fatal("private method package identity changed")
+		}
+		value := reflect.New(restored)
+		value.Elem().Field(0).SetInt(42)
+		if got := method.Func.Call([]reflect.Value{value})[0].Int(); got != 43 || value.Elem().Field(0).Int() != 43 {
+			t.Fatalf("restored method: result=%d, N=%d", got, value.Elem().Field(0).Int())
 		}
 		return
 	}
 	for _, mode := range []string{"named", "unnamed"} {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestReflectxStateRejectMethods$")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestReflectxStateMethods$")
 		cmd.Env = append(os.Environ(), childEnv+"="+mode)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", mode, err, output)

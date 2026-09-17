@@ -22,6 +22,7 @@ import (
 	"sort"
 	"unsafe"
 
+	"github.com/goplus/ixgo"
 	"github.com/visualfc/xtype"
 	"github.com/xgo-dev/sandbox/internal/reflecttype"
 	"github.com/xgo-dev/sandbox/internal/reflectxtype"
@@ -74,7 +75,9 @@ type encodeState struct {
 	// types is the type database.
 	types typeEncodeDatabase
 
-	reflected map[reflect.Type]*reflectedType
+	reflected        map[reflect.Type]*reflectedType
+	reflectx         *reflectxtype.ReflectType
+	reflectxSnapshot *reflectxtype.Snapshot
 
 	native nativeState
 
@@ -87,8 +90,9 @@ type encodeState struct {
 	//
 	// Multiple objects may overlap in memory iff the larger object fully
 	// contains the smaller one, and the type of the smaller object matches
-	// a field or array element's type at the appropriate offset. An
-	// arbitrary number of objects may be nested in this manner.
+	// a field or array element's type at the appropriate offset. Pointer
+	// conversions may also expose the same storage under different types,
+	// such as go/types.Term and go/types.term.
 	//
 	// Note that this does not track zero-sized objects, those are tracked
 	// by zeroValues below.
@@ -150,6 +154,9 @@ type encodeState struct {
 //
 // Precondition: parent and child must occupy the same memory.
 func isSameSizeParent(parent reflect.Value, childType reflect.Type) bool {
+	if parent.Type().Size() == childType.Size() && reflect.PointerTo(parent.Type()).ConvertibleTo(reflect.PointerTo(childType)) {
+		return true
+	}
 	switch parent.Kind() {
 	case reflect.Struct:
 		for i := 0; i < parent.NumField(); i++ {
@@ -306,11 +313,13 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 	if seg.Ok() && seg.Start() < end {
 		existing := seg.Value()
 
-		if seg.Range() == r && typ == existing.obj.Type() {
-			// This exact object is already registered. Avoid the traversal and
-			// just return directly. We don't need to encode the type
-			// information or any dots here.
+		if seg.Range() == r && reflect.PointerTo(existing.obj.Type()).ConvertibleTo(reflect.PointerTo(typ)) {
+			// Preserve the registered type even if a converted pointer is
+			// decoded first; its StateLoad method may differ from the view's.
 			ref.Root = uintValue(existing.id)
+			if typ != existing.obj.Type() {
+				ref.Type = es.findType(existing.obj.Type())
+			}
 			existing.refs = append(existing.refs, ref)
 			return
 		}
@@ -411,7 +420,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 }
 
 // traverse searches for a target object within a root object, where the target
-// object is a struct field or array element within root, with potentially
+// object is a struct field, array element, or array range within root, with potentially
 // multiple intervening types. traverse returns the set of field or element
 // traversals required to reach the target.
 //
@@ -421,8 +430,8 @@ func (es *encodeState) resolve(obj reflect.Value, ref *refValue) {
 // Precondition: The target object must lie completely within the range defined
 // by [rootAddr, rootAddr + sizeof(rootType)].
 func traverse(rootType, targetType reflect.Type, rootAddr, targetAddr uintptr) []dot {
-	// Recursion base case: the types actually match.
-	if targetType == rootType && targetAddr == rootAddr {
+	// A converted pointer names the same object, not its first field.
+	if targetAddr == rootAddr && rootType.Size() == targetType.Size() && reflect.PointerTo(rootType).ConvertibleTo(reflect.PointerTo(targetType)) {
 		return nil
 	}
 
@@ -444,6 +453,23 @@ func traverse(rootType, targetType reflect.Type, rootAddr, targetAddr uintptr) [
 		Failf("no field in root type %v contains target type %v", rootType, targetType)
 
 	case reflect.Array:
+		if targetType.Kind() == reflect.Array && targetType.Elem() == rootType.Elem() {
+			// A slice such as a[18:] names a range of a's backing array,
+			// not the single element a[18]. Preserve it as a shared view.
+			elemSize := rootType.Elem().Size()
+			offset := targetAddr - rootAddr
+			if targetAddr < rootAddr || elemSize == 0 && offset != 0 || elemSize != 0 && offset%elemSize != 0 {
+				Failf("unaligned array range of type %v @%x within %v @%x", targetType, targetAddr, rootType, rootAddr)
+			}
+			var start uintptr
+			if elemSize != 0 {
+				start = offset / elemSize
+			}
+			if start > uintptr(rootType.Len()) || uintptr(targetType.Len()) > uintptr(rootType.Len())-start {
+				Failf("array range of type %v @%x exceeds %v @%x", targetType, targetAddr, rootType, rootAddr)
+			}
+			return []dot{arrayRange{start: uintValue(start), length: uintValue(targetType.Len())}}
+		}
 		// Since arrays have homogeneous types, all elements have the
 		// same size and we can compute where the target lives. This
 		// does not matter for the purpose of typing, but matters for
@@ -752,6 +778,20 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 	checkProcessResource(obj.Type())
 	switch obj.Kind() {
 	case reflect.Ptr: // Fast path: first.
+		if obj.Type() == reflect.TypeFor[*ixgo.Package]() {
+			// Packages registered during init belong to the receiving runtime.
+			// Keep nil as an empty path so arrays use one record kind throughout.
+			var path stringValue
+			if !obj.IsNil() {
+				pkg := obj.Interface().(*ixgo.Package)
+				if pkg.Path == "" {
+					Failf("ixgo.Package has no package path")
+				}
+				path = stringValue(pkg.Path)
+			}
+			*dest = &path
+			return
+		}
 		if obj.Type() == reflect.TypeFor[*os.File]() && !obj.IsNil() {
 			for i, stream := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
 				if stream != nil && obj.Interface().(*os.File) == stream && stream.Fd() == uintptr(i) {
@@ -850,14 +890,62 @@ func (es *encodeState) Save(obj reflect.Value) {
 
 	// Encode the graph.
 	var oes *objectEncodeState
+	var snapshot *reflecttype.Snapshot
+	var extended *reflectxtype.Snapshot
+	methodRecords := make(map[uintptr]object)
+	var methods arrayValue
 	if err := safely(func() {
-		for oes = es.deferred.Front(); oes != nil; oes = es.deferred.Front() {
-			// Remove and encode the object. Note that as a result
-			// of this encoding, the object may be enqueued on the
-			// deferred list yet again. That's expected, and why it
-			// is removed first.
-			es.deferred.Remove(oes)
-			es.encodeObject(oes.obj, oes.how, &oes.encoded)
+		for {
+			for oes = es.deferred.Front(); oes != nil; oes = es.deferred.Front() {
+				// Remove and encode the object. Note that as a result
+				// of this encoding, the object may be enqueued on the
+				// deferred list yet again. That's expected, and why it
+				// is removed first.
+				es.deferred.Remove(oes)
+				es.encodeObject(oes.obj, oes.how, &oes.encoded)
+			}
+			if len(es.reflected) == 0 {
+				break
+			}
+			var err error
+			snapshot, err = reflecttype.Export()
+			if err != nil {
+				Failf("export reflect types: %w", err)
+			}
+			needExtended := extended != nil
+			for typ := range es.reflected {
+				if snapshot.IDs[typ] == 0 {
+					needExtended = true
+					break
+				}
+			}
+			if !needExtended {
+				break
+			}
+			if es.reflectx != nil {
+				extended, err = es.reflectx.Export()
+			} else {
+				extended, err = reflectxtype.Export()
+			}
+			if err != nil {
+				Failf("export reflectx types: %w", err)
+			}
+			methods.Contents = make([]object, len(extended.Methods))
+			for i, fn := range extended.Methods {
+				callback := makeFuncCallback(fn)
+				address := callback.Addr().Pointer()
+				record, ok := methodRecords[address]
+				if !ok {
+					es.encodeFunction(callback, &record)
+					methodRecords[address] = record
+				}
+				methods.Contents[i] = record
+			}
+			// Method environments can expose more types and methods. Finish their
+			// objects before assigning the final type IDs for the entire graph.
+			if es.deferred.Front() == nil {
+				break
+			}
 		}
 	}); err != nil {
 		// Report the type without copying live synchronization state.
@@ -875,22 +963,14 @@ func (es *encodeState) Save(obj reflect.Value) {
 	// Types synthesized while walking slices or native closure storage now
 	// exist in the caches. Assign their final snapshot IDs before writing values.
 	var typeData, reflectxData []byte
-	if len(es.reflected) != 0 {
-		snapshot, err := reflecttype.Export()
-		if err != nil {
-			Failf("export reflect types: %w", err)
+	if snapshot != nil {
+		if extended != nil {
+			reflectxData = extended.Data
+			es.reflectxSnapshot = extended
 		}
-		var extended *reflectxtype.Snapshot
 		for typ, ref := range es.reflected {
 			id, ok := snapshot.IDs[typ]
 			if !ok {
-				if extended == nil {
-					extended, err = reflectxtype.Export()
-					if err != nil {
-						Failf("export reflectx types: %w", err)
-					}
-					reflectxData = extended.Data
-				}
 				id, ok = extended.IDs[typ]
 				if !ok {
 					Failf("type %v is missing from the reflect and reflectx snapshots", typ)
@@ -909,6 +989,11 @@ func (es *encodeState) Save(obj reflect.Value) {
 		Failf("error writing reflectx type table header: %w", err)
 	}
 	es.w.writeBytes(reflectxData)
+	if len(methods.Contents) != 0 {
+		if err := es.w.put(&methods); err != nil {
+			Failf("writing method callbacks: %w", err)
+		}
+	}
 
 	// Write the header with the number of objects.
 	if err := writeHeader(&es.w, uint64(len(es.pending)), true); err != nil {

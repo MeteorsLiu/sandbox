@@ -3,11 +3,12 @@
 
 // Package reflectxtype transfers dynamic reflectx type definitions. It requires
 // Go 1.26.6 and -ldflags=-checklinkname=0. Static dependencies require the same
-// executable and loaded type modules. Concrete method implementations are not
-// transferred; types containing them are rejected.
+// executable and loaded type modules. Method definitions travel with types;
+// callers transfer their functions separately and install the restored callbacks.
 package reflectxtype
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -23,12 +24,18 @@ import (
 // Data crosses the process boundary. IDs include referenced system types;
 // system references use the same static locations as the reflecttype codec.
 type Snapshot struct {
-	Data []byte
-	IDs  map[reflect.Type]uint32
+	Data    []byte
+	IDs     map[reflect.Type]uint32
+	Methods []reflect.Value
 }
 
 type ReflectType struct {
-	types []reflect.Type
+	types       []reflect.Type
+	entries     [][]byte
+	definitions []definition
+	ctx         *reflectx.Context
+	methodCount int
+	retained    int
 }
 
 // Resolve returns a completed local type. Concurrent Resolve calls are safe.
@@ -49,6 +56,17 @@ var transferMu sync.Mutex
 // state already does for reflecttype. Cache enumeration is not a whole-process
 // registry or an atomic snapshot of external constructor calls.
 func Export() (*Snapshot, error) {
+	return export(nil)
+}
+
+// Export preserves this import's type and method IDs and appends newly created
+// types. For example, a returned Node still has its original snapshot ID even
+// when the guest's reflect caches enumerate entries in a different order.
+func (t *ReflectType) Export() (*Snapshot, error) {
+	return export(t)
+}
+
+func export(previous *ReflectType) (*Snapshot, error) {
 	if runtime.Version() != "go1.26.6" {
 		return nil, fmt.Errorf("reflectxtype requires go1.26.6, got %s", runtime.Version())
 	}
@@ -67,6 +85,28 @@ func Export() (*Snapshot, error) {
 		ids:      make(map[reflect.Type]uint32),
 		needed:   make(map[reflect.Type]bool),
 		visiting: make(map[reflect.Type]bool),
+	}
+	if previous != nil {
+		e.entries = make([][]byte, len(previous.types))
+		e.methods = make([]reflect.Value, previous.methodCount)
+		e.retainedMethods = make(map[reflect.Type][]method)
+		for i, typ := range previous.types {
+			e.ids[typ] = uint32(i + 1)
+			def := previous.definitions[i]
+			if def.kind != reflect.Interface && len(def.methods) != 0 {
+				e.retainedMethods[typ] = def.methods
+			}
+		}
+		for i, typ := range previous.types {
+			entry, err := e.encode(typ)
+			if err != nil {
+				return nil, fmt.Errorf("export retained reflectx type %v: %w", typ, err)
+			}
+			if !bytes.Equal(entry, previous.entries[i]) {
+				return nil, fmt.Errorf("retained reflectx type ID %d changed definition", i+1)
+			}
+			e.entries[i] = entry
+		}
 	}
 	for from, to := range ctx.embed {
 		roots = append(roots, from, to)
@@ -94,18 +134,21 @@ func Export() (*Snapshot, error) {
 		data = binary.AppendUvarint(data, uint64(len(entry)))
 		data = append(data, entry...)
 	}
-	return &Snapshot{Data: data, IDs: e.ids}, nil
+	return &Snapshot{Data: data, IDs: e.ids, Methods: e.methods}, nil
 }
 
 // Zero denotes an executable type location, primitive kinds denote builtins,
 // and dynamic|kind denotes a definition with identity and layout metadata.
 const dynamic = 1 << 8
+const concreteMethods = 1 << 9
 
 type exporter struct {
-	ids      map[reflect.Type]uint32
-	entries  [][]byte
-	needed   map[reflect.Type]bool
-	visiting map[reflect.Type]bool
+	ids             map[reflect.Type]uint32
+	entries         [][]byte
+	needed          map[reflect.Type]bool
+	visiting        map[reflect.Type]bool
+	methods         []reflect.Value
+	retainedMethods map[reflect.Type][]method
 }
 
 func (e *exporter) requiresReflectx(typ reflect.Type) bool {
@@ -162,10 +205,21 @@ func (e *exporter) encode(typ reflect.Type) ([]byte, error) {
 		data = binary.AppendUvarint(data, uint64(location.module))
 		return binary.AppendUvarint(data, location.offset), nil
 	}
-	if kind != reflect.Interface && (reflectx.NumMethodX(typ) != 0 || reflectx.NumMethodX(reflectx.PtrTo(typ)) != 0) {
-		return nil, fmt.Errorf("concrete method implementations are not supported")
+	var methods []reflectx.Method
+	var functions []reflect.Value
+	var hasInterface []bool
+	if kind != reflect.Interface && (kind != reflect.Pointer || typ.Name() != "") {
+		methods, functions, hasInterface = concreteMethodSet(typ)
 	}
-	data := binary.AppendUvarint(nil, dynamic|uint64(kind))
+	retained := e.retainedMethods[typ]
+	if len(retained) != 0 && len(retained) != len(methods) {
+		return nil, fmt.Errorf("retained method count changed for %v", typ)
+	}
+	tag := dynamic | uint64(kind)
+	if len(methods) != 0 {
+		tag |= concreteMethods
+	}
+	data := binary.AppendUvarint(nil, tag)
 	data = appendString(data, typ.Name())
 	data = appendString(data, typ.PkgPath())
 	data = binary.AppendUvarint(data, uint64(typ.Size()))
@@ -235,6 +289,50 @@ func (e *exporter) encode(typ reflect.Type) ([]byte, error) {
 	default:
 		if builtinTypes[kind] == nil {
 			return nil, fmt.Errorf("unsupported kind %v", kind)
+		}
+	}
+	if len(methods) != 0 {
+		type identity struct {
+			name, pkg string
+			pointer   bool
+		}
+		var indices map[identity]int
+		if len(retained) != 0 {
+			indices = make(map[identity]int, len(methods))
+			for i, method := range methods {
+				indices[identity{method.Name, method.PkgPath, method.Pointer}] = i
+			}
+		}
+		data = binary.AppendUvarint(data, uint64(len(methods)))
+		for i := range methods {
+			index := i
+			if len(retained) != 0 {
+				// SetMethodSet may reorder methods; e.g. a.initApp and b.execWith.
+				// Match their identities while preserving the original wire order.
+				previous := retained[i]
+				var ok bool
+				index, ok = indices[identity{previous.name, previous.pkg, previous.pointer}]
+				if !ok {
+					return nil, fmt.Errorf("retained method %s.%s changed for %v", previous.pkg, previous.name, typ)
+				}
+			}
+			method := methods[index]
+			data = appendString(data, method.Name)
+			data = appendString(data, method.PkgPath)
+			data = appendFlag(data, method.Pointer)
+			data = appendFlag(data, hasInterface[index])
+			if err := appendType(method.Type); err != nil {
+				return nil, err
+			}
+			var id int
+			if len(retained) != 0 {
+				id = retained[i].function
+				e.methods[id-1] = functions[index]
+			} else {
+				e.methods = append(e.methods, functions[i])
+				id = len(e.methods)
+			}
+			data = binary.AppendUvarint(data, uint64(id))
 		}
 	}
 	return data, nil

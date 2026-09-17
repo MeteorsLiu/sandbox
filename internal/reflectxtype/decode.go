@@ -4,6 +4,7 @@
 package reflectxtype
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -17,6 +18,16 @@ import (
 // Open rebuilds a snapshot in this process. Static references require the same
 // executable and type modules. The returned table does not retain data.
 func Open(data []byte) (result *ReflectType, err error) {
+	return open(data, nil)
+}
+
+// Open restores a returned snapshot, reusing the types from this export.
+// Retained definitions must be unchanged; additional IDs describe new types.
+func (s *Snapshot) Open(data []byte) (*ReflectType, error) {
+	return open(data, s)
+}
+
+func open(data []byte, previous *Snapshot) (result *ReflectType, err error) {
 	if runtime.Version() != "go1.26.6" {
 		return nil, fmt.Errorf("reflectxtype requires go1.26.6, got %s", runtime.Version())
 	}
@@ -43,9 +54,11 @@ func Open(data []byte) (result *ReflectType, err error) {
 		mocking:     make([]bool, n),
 		ctx:         reflectx.NewContext(),
 	}
+	entries := make([][]byte, n)
 	for i := range d.definitions {
 		length := r.count()
 		entry := typeReader(r[:length])
+		entries[i] = bytes.Clone(entry)
 		d.parse(i, &entry)
 		if len(entry) != 0 {
 			return nil, fmt.Errorf("trailing data for reflectx type ID %d", i+1)
@@ -55,18 +68,59 @@ func Open(data []byte) (result *ReflectType, err error) {
 	if len(r) != 0 {
 		return nil, fmt.Errorf("trailing reflectx type table data")
 	}
+	var retained int
+	if previous != nil {
+		old := typeReader(previous.Data)
+		retained = old.count()
+		if retained > n || len(previous.IDs) != retained {
+			return nil, fmt.Errorf("returned reflectx type table lost retained IDs")
+		}
+		for i := range retained {
+			length := old.count()
+			if !bytes.Equal(entries[i], old[:length]) {
+				return nil, fmt.Errorf("returned reflectx type ID %d changed definition", i+1)
+			}
+			old = old[length:]
+		}
+		if len(old) != 0 {
+			return nil, fmt.Errorf("trailing retained reflectx type table data")
+		}
+		for typ, id := range previous.IDs {
+			if id == 0 || uint64(id) > uint64(retained) {
+				return nil, fmt.Errorf("invalid retained reflectx type ID %d", id)
+			}
+			d.types[id-1], d.done[id-1] = typ, true
+		}
+	}
+	// Callback IDs index the complete method table, not the bytes remaining
+	// in an individual type record. For example, its last byte may be ID 1.
+	functions := make([]bool, d.methodCount)
+	for _, def := range d.definitions {
+		if def.kind == reflect.Interface {
+			continue
+		}
+		for _, method := range def.methods {
+			if method.function > d.methodCount || functions[method.function-1] {
+				return nil, fmt.Errorf("invalid method function index %d", method.function)
+			}
+			functions[method.function-1] = true
+		}
+	}
 	// Named types must keep their identity when a dependency refers back to them.
 	// The mock has the final storage layout; e.g. Node{N int; Next *Node} uses
 	// {N int; Next *struct{}} until its fields can point at the completed types.
 	for i, def := range d.definitions {
 		if !d.done[i] && def.name != "" {
 			d.types[i] = reflectx.NamedTypeOf(def.pkg, def.name, d.mock(uint32(i+1)))
+			if def.kind != reflect.Interface && len(def.methods) != 0 {
+				d.types[i] = d.reserveMethods(d.types[i], def.methods)
+			}
 		}
 	}
 	for i := range d.definitions {
 		d.resolve(uint32(i + 1))
 	}
-	return &ReflectType{types: d.types}, nil
+	return &ReflectType{types: d.types, entries: entries, definitions: d.definitions, ctx: d.ctx, methodCount: d.methodCount, retained: retained}, nil
 }
 
 type definition struct {
@@ -91,8 +145,11 @@ type field struct {
 }
 
 type method struct {
-	name, pkg string
-	typ       uint32
+	name, pkg    string
+	typ          uint32
+	pointer      bool
+	hasInterface bool
+	function     int
 }
 
 type importer struct {
@@ -102,6 +159,7 @@ type importer struct {
 	mocks           []reflect.Type
 	mocking         []bool
 	ctx             *reflectx.Context
+	methodCount     int
 }
 
 func (d *importer) parse(index int, r *typeReader) {
@@ -125,6 +183,8 @@ func (d *importer) parse(index int, r *typeReader) {
 		d.types[index], d.done[index] = builtinTypes[tag], true
 		return
 	}
+	hasMethods := tag&concreteMethods != 0
+	tag &^= concreteMethods
 	if tag <= dynamic || tag > dynamic+uint64(reflect.UnsafePointer) {
 		panic(fmt.Errorf("invalid dynamic kind %d", tag))
 	}
@@ -174,13 +234,39 @@ func (d *importer) parse(index int, r *typeReader) {
 	case reflect.Interface:
 		def.methods = make([]method, r.count())
 		for i := range def.methods {
-			def.methods[i] = method{r.string(), r.string(), d.readID(r)}
+			def.methods[i] = method{name: r.string(), pkg: r.string(), typ: d.readID(r)}
 		}
 	default:
 		if def.name == "" || builtinTypes[def.kind] == nil {
 			panic(fmt.Errorf("invalid named primitive kind %v", def.kind))
 		}
 	}
+	if hasMethods {
+		if def.kind == reflect.Interface || def.kind == reflect.Pointer && def.name == "" {
+			panic(fmt.Errorf("invalid concrete method owner at type ID %d", index+1))
+		}
+		def.methods = make([]method, r.count())
+		d.methodCount += len(def.methods)
+		for i := range def.methods {
+			m := method{name: r.string(), pkg: r.string(), pointer: r.flag(), hasInterface: r.flag(), typ: d.readID(r)}
+			function := r.uint()
+			if function == 0 || function > math.MaxInt {
+				panic(fmt.Errorf("invalid method function index %d", function))
+			}
+			m.function = int(function)
+			def.methods[i] = m
+		}
+	}
+}
+
+func (d *importer) reserveMethods(typ reflect.Type, methods []method) reflect.Type {
+	var values int
+	for _, method := range methods {
+		if !method.pointer {
+			values++
+		}
+	}
+	return d.ctx.NewMethodSet(typ, values, len(methods))
 }
 
 func (d *importer) readID(r *typeReader) uint32 {
@@ -208,6 +294,8 @@ func (d *importer) resolve(id uint32) reflect.Type {
 	if def.name != "" {
 		reflectx.SetUnderlying(d.types[i], typ)
 		typ = d.types[i]
+	} else if def.kind != reflect.Interface && len(def.methods) != 0 {
+		typ = d.reserveMethods(typ, def.methods)
 	}
 	if uint64(typ.Size()) != def.size || uint64(typ.Align()) != def.align || typ.Comparable() != def.comparable {
 		panic(fmt.Errorf("layout mismatch for reflectx type ID %d (%v)", id, typ))
@@ -278,7 +366,7 @@ func (d *importer) construct(def *definition, resolve func(uint32) reflect.Type)
 		for i, f := range def.fields {
 			fields[i] = reflect.StructField{Name: f.name, PkgPath: f.pkg, Tag: reflect.StructTag(f.tag), Anonymous: f.anonymous, Type: resolve(f.typ)}
 		}
-		return d.ctx.StructOf(fields)
+		return structOf(fields)
 	case reflect.Interface:
 		methods := make([]reflect.Method, len(def.methods))
 		for i, m := range def.methods {
@@ -345,7 +433,7 @@ func (d *importer) mock(id uint32) reflect.Type {
 		for i, f := range def.fields {
 			fields[i] = reflect.StructField{Name: f.name, PkgPath: f.pkg, Tag: reflect.StructTag(f.tag), Type: d.mock(f.typ)}
 		}
-		typ = d.ctx.StructOf(fields)
+		typ = structOf(fields)
 	case reflect.Array:
 		typ = reflect.ArrayOf(def.length, d.mock(def.elem))
 	default:

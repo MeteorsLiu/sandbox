@@ -23,6 +23,7 @@ import (
 	"os"
 	"reflect"
 
+	"github.com/goplus/ixgo"
 	"github.com/visualfc/xtype"
 	"github.com/xgo-dev/sandbox/internal/reflecttype"
 	"github.com/xgo-dev/sandbox/internal/reflectxtype"
@@ -165,8 +166,9 @@ type decodeState struct {
 	// types is the type database.
 	types typeDecodeDatabase
 
-	reflected *reflecttype.ReflectType
-	reflectx  *reflectxtype.ReflectType
+	reflected        *reflecttype.ReflectType
+	reflectx         *reflectxtype.ReflectType
+	reflectxSnapshot *reflectxtype.Snapshot
 
 	native    nativeState
 	functions []decodedFunction
@@ -276,6 +278,18 @@ func (ds *decodeState) waitObject(ods *objectDecodeState, encoded object, callba
 		ds.waitObject(ods, rv.Value, callback)
 	} else if fv, ok := encoded.(*functionValue); ok && fv.Env.Root != 0 {
 		ds.wait(ods, objectID(fv.Env.Root), callback)
+	} else if av, ok := encoded.(*arrayValue); ok {
+		blockedBy := ods.blockedBy
+		for _, value := range av.Contents {
+			ds.waitObject(ods, value, nil)
+		}
+		if callback != nil {
+			if ods.blockedBy == blockedBy {
+				callback()
+			} else {
+				ods.addCallback(userCallback(callback))
+			}
+		}
 	} else if callback != nil {
 		// Nothing to wait for: execute the callback immediately.
 		callback()
@@ -286,7 +300,7 @@ func (ds *decodeState) waitObject(ods *objectDecodeState, encoded object, callba
 // the decode-side equivalent to traverse in encode.go.
 //
 // For the purposes of this function, a child object is either a field within a
-// struct or an array element, with one such indirection per element in
+// struct, an array element, or an array range, with one indirection per element in
 // path. The returned value may be an unexported field, so it may not be
 // directly assignable. See decode_unsafe.go.
 func walkChild(path []dot, obj reflect.Value) reflect.Value {
@@ -303,6 +317,17 @@ func walkChild(path []dot, obj reflect.Value) reflect.Value {
 				Failf("next component in child path is an array index, but the current object is not an array. Path: %v, current obj: %#v", path, obj)
 			}
 			obj = obj.Index(int(pc))
+		case arrayRange:
+			if obj.Kind() != reflect.Array {
+				Failf("array range path requires an array, got %v", obj.Type())
+			}
+			if pc.start > uintValue(obj.Len()) || pc.length > uintValue(obj.Len())-pc.start {
+				Failf("array range start=%d length=%d exceeds %v", pc.start, pc.length, obj.Type())
+			}
+			end := int(pc.start + pc.length)
+			view := reflectValueRWSlice3(obj, int(pc.start), end, end)
+			typ := reflect.ArrayOf(int(pc.length), obj.Type().Elem())
+			obj = view.Convert(reflect.PointerTo(typ)).Elem()
 		default:
 			panic("unreachable: switch should be exhaustive")
 		}
@@ -347,7 +372,7 @@ func (ds *decodeState) register(r *refValue, typ reflect.Type) reflect.Value {
 	}
 
 	// Create the object.
-	if len(r.Dots) != 0 {
+	if r.Type != nil {
 		typ = ds.findType(r.Type)
 	}
 	v := reflect.New(typ)
@@ -471,7 +496,12 @@ func (ds *decodeState) decodeArray(ods *objectDecodeState, obj reflect.Value, en
 	// Decode the contents into the array.
 	for i := 0; i < len(encoded.Contents); i++ {
 		ds.decodeObject(ods, obj.Index(i), encoded.Contents[i])
-		ds.waitObject(ods, encoded.Contents[i], nil)
+		// An inline array is a field, not its owner's completion dependency.
+		// For example, A.Next[0] = B and B.Next[0] = A is an ordinary cycle.
+		// Explicit LoadWait/LoadValue expands these elements in waitObject.
+		if obj == ods.obj {
+			ds.waitObject(ods, encoded.Contents[i], nil)
+		}
 	}
 }
 
@@ -596,9 +626,13 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 			return
 		}
 
-		// Normal assignment: authoritative only if no dots.
+		// Convert the pointer, retaining the registered object's storage.
 		v := ds.register(x, obj.Type().Elem())
-		obj.Set(reflectValueRWAddr(v))
+		ptr := reflectValueRWAddr(v)
+		if ptr.Type() != obj.Type() {
+			ptr = ptr.Convert(obj.Type())
+		}
+		obj.Set(ptr)
 	case boolValue:
 		obj.SetBool(bool(x))
 	case intValue:
@@ -638,6 +672,18 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 			Failf("complex number truncated from %v to %v", complex128(*x), obj.Complex())
 		}
 	case *stringValue:
+		if obj.Type() == reflect.TypeFor[*ixgo.Package]() {
+			if *x == "" {
+				obj.SetZero()
+				return
+			}
+			pkg, ok := ixgo.LookupPackage(string(*x))
+			if !ok {
+				Failf("ixgo package %q is not registered in this process", *x)
+			}
+			obj.Set(reflect.ValueOf(pkg))
+			return
+		}
 		obj.SetString(string(*x))
 	case *sliceValue:
 		if id := objectID(x.Ref.Root); id == 0 {
@@ -743,7 +789,11 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		Failf("reflectx type table missing")
 	}
 	if data := ds.r.readBytes(typeBytes); len(data) != 0 {
-		ds.reflectx, err = reflectxtype.Open(data)
+		if ds.reflectxSnapshot != nil {
+			ds.reflectx, err = ds.reflectxSnapshot.Open(data)
+		} else {
+			ds.reflectx, err = reflectxtype.Open(data)
+		}
 		if err != nil {
 			Failf("import reflectx types: %w", err)
 		}
@@ -754,6 +804,29 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		ds.addObject(1, obj)
 	} else if root.obj.Type() != obj.Type() || root.obj.Addr().Pointer() != obj.Addr().Pointer() {
 		Failf("root object changed during round trip")
+	}
+	if ds.reflectx != nil && ds.reflectx.MethodCount() != 0 {
+		encoded, err := ds.r.get()
+		if err != nil {
+			Failf("method callbacks: %w", err)
+		}
+		methods, ok := encoded.(*arrayValue)
+		if !ok || len(methods.Contents) != ds.reflectx.MethodCount() {
+			Failf("method callback count does not match type table")
+		}
+		callbacks := make([]func([]reflect.Value) []reflect.Value, len(methods.Contents))
+		for i, record := range methods.Contents {
+			fn, ok := record.(*functionValue)
+			if !ok {
+				Failf("invalid method callback %T", record)
+			}
+			ds.decodeFunction(reflect.ValueOf(&callbacks[i]).Elem(), fn)
+		}
+		// Allocate closure storage first, install the method table, then fill
+		// the environments. Interfaces decoded below see the final Ifn entries.
+		if err := ds.reflectx.SetMethods(callbacks); err != nil {
+			Failf("restore reflectx methods: %w", err)
+		}
 	}
 
 	// Read the number of objects.
@@ -869,6 +942,28 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	// Check if we have any remaining dependency cycles. If there are any
 	// objects left in the pending list, then it must be due to a cycle.
 	if elem := ds.pending.Front(); elem != nil {
+		// Temporary diagnostics: callbacks point from a dependency to its
+		// waiters, so invert those edges to show what each pending object needs.
+		dependencies := make(map[objectID][]objectID)
+		for _, dependency := range ds.objectsByID {
+			if dependency == nil {
+				continue
+			}
+			for _, callback := range dependency.callbacks {
+				if waiter := callback.source(); waiter != nil {
+					dependencies[waiter.id] = append(dependencies[waiter.id], dependency.id)
+				}
+			}
+		}
+		leaves := make(map[objectID]bool)
+		for leaf := ds.leaves.Front(); leaf != nil; leaf = leaf.Next() {
+			leaves[leaf.ods.id] = true
+		}
+		fmt.Fprintf(os.Stderr, "state decode incomplete: objects=%d pending=%d leaves=%d deferred=%d\n", len(ds.objectsByID), ds.pending.Len(), len(leaves), len(ds.deferred))
+		for pending := ds.pending.Front(); pending != nil; pending = pending.Next() {
+			object := pending.ods
+			fmt.Fprintf(os.Stderr, "state pending: id=%d type=%v blocked_by=%d in_leaves=%t callbacks=%d waits_for=%v\n", object.id, object.obj.Type(), object.blockedBy, leaves[object.id], len(object.callbacks), dependencies[object.id])
+		}
 		// This must be the result of a dependency cycle.
 		cycle := elem.ods.findCycle()
 		var buf bytes.Buffer

@@ -218,7 +218,7 @@ func (*stringValue) load(r *reader) object {
 	return &s
 }
 
-// dot is a kind of reference: one of index and fieldName.
+// dot selects an array element, array range, or struct field.
 type dot interface {
 	isDot()
 }
@@ -227,6 +227,15 @@ type dot interface {
 type index uint32
 
 func (index) isDot() {}
+
+type arrayRange struct {
+	start, length uintValue
+}
+
+func (arrayRange) isDot() {}
+
+// Array indices fit in uint32; the next value identifies a range.
+const arrayRangeTag intValue = 1 << 32
 
 // fieldName is a reference resolution.
 type fieldName string
@@ -242,9 +251,8 @@ type refValue struct {
 	// Note that this will be stored in reverse order for efficiency.
 	Dots []dot
 
-	// Type is the base type for the root object. This is non-nil iff Dots
-	// is non-zero length (that is, this is a complex reference). This is
-	// not *strictly* necessary, but can be used to simplify decoding.
+	// Type is the root object's type when Dots is nonempty or the pointer
+	// targets a different type through a Go pointer conversion.
 	Type typeSpec
 }
 
@@ -253,13 +261,17 @@ func loadRef(r *reader) refValue {
 	ref := refValue{
 		Root: loadUint(r),
 	}
-	l := loadUint(r)
+	header := loadUint(r)
+	l := header >> 1
 	ref.Dots = make([]dot, l)
 	for i := 0; i < int(l); i++ {
-		// Disambiguate between an index (non-negative) and a field
-		// name (negative). This does some space and avoids a dedicate
-		// loadDot function. See refValue.save for the other side.
+		// Field names use negative lengths; non-negative values select
+		// array indices or the range tag.
 		d := loadInt(r)
+		if d == arrayRangeTag {
+			ref.Dots[i] = arrayRange{start: loadUint(r), length: loadUint(r)}
+			continue
+		}
 		if d >= 0 {
 			ref.Dots[i] = index(d)
 			continue
@@ -267,8 +279,7 @@ func loadRef(r *reader) refValue {
 		fieldName := fieldName(r.readBytes(uint64(-d)))
 		ref.Dots[i] = &fieldName
 	}
-	if l != 0 {
-		// Only if dots is non-zero.
+	if header&1 != 0 {
 		ref.Type = loadTypeSpec(r)
 	}
 	return ref
@@ -277,15 +288,21 @@ func loadRef(r *reader) refValue {
 // save implements object.save.
 func (r *refValue) save(w *writer) {
 	r.Root.save(w)
-	l := uintValue(len(r.Dots))
-	l.save(w)
+	// The low bit marks an explicit root type, independently of the path.
+	header := uintValue(len(r.Dots)) << 1
+	if r.Type != nil {
+		header |= 1
+	}
+	header.save(w)
 	for _, d := range r.Dots {
-		// See LoadRef. We use non-negative numbers to encode index
-		// objects and negative numbers to encode field lengths.
 		switch x := d.(type) {
 		case index:
 			i := intValue(x)
 			i.save(w)
+		case arrayRange:
+			arrayRangeTag.save(w)
+			x.start.save(w)
+			x.length.save(w)
 		case *fieldName:
 			d := intValue(-len(*x))
 			d.save(w)
@@ -294,8 +311,7 @@ func (r *refValue) save(w *writer) {
 			panic("unknown dot implementation")
 		}
 	}
-	if l != 0 {
-		// See above.
+	if r.Type != nil {
 		saveTypeSpec(w, r.Type)
 	}
 }

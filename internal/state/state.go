@@ -90,7 +90,9 @@ func (e *ErrState) Unwrap() error {
 // The caller owns mem; Save does not allocate a replacement when it is full.
 // The stream starts with standard reflect and reflectx type tables, followed
 // by the object graph. Type references prefer the standard table. Dynamic
-// reflectx types without concrete methods are reconstructed in the second table.
+// reflectx types and method definitions are reconstructed in the second table.
+// Method callbacks use the same closure graph as ordinary function values;
+// local method entries are installed before interface values are restored.
 // reflect.Type and xtype.Type values refer to these tables; host descriptor
 // addresses are not transferred. Finish type construction and context resets
 // before Save or Load, including constructors outside the source object graph.

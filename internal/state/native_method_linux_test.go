@@ -11,6 +11,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/goplus/reflectx"
+	methodpkg "github.com/xgo-dev/sandbox/internal/state/testdata/method.pkg"
 )
 
 type nativeMethodReceiver struct {
@@ -42,6 +45,81 @@ type nativeScalarReceiver int
 func (r nativeScalarReceiver) Value() int { return int(r) }
 
 type nativePromotedReceiver struct{ *nativeMethodReceiver }
+
+type nativeForeignReceiver struct{ methodpkg.Receiver }
+
+func TestNativePackagePrefix(t *testing.T) {
+	for _, test := range []struct{ path, prefix string }{
+		{"runtime", "runtime"},
+		{"example.org/pkg", "example.org/pkg"},
+		{"example.org/pkg.v1", "example.org/pkg%2ev1"},
+		{"example.org/parent.v1/pkg", "example.org/parent.v1/pkg"},
+		{"example.org/pkg%1", "example.org/pkg%251"},
+		{"\x01 \"\x7f\xc3\xa9", "%01%20%22%7f%c3%a9"},
+	} {
+		if got := nativePackagePrefix(test.path); got != test.prefix {
+			t.Errorf("PathToPrefix(%q) = %q, want %q", test.path, got, test.prefix)
+		}
+	}
+}
+
+func TestNativeQualifiedPrivateMethods(t *testing.T) {
+	m, err := loadNativeMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.path = filepath.Join(t.TempDir(), "missing-executable")
+	value := nativeForeignReceiver{methodpkg.Receiver{N: 42}}
+	if methodpkg.Value(value) != 42 || methodpkg.Value(&value) != 42 || methodpkg.Add(&value, 0) != 42 {
+		t.Fatal("source private methods failed")
+	}
+	for _, test := range []struct {
+		receiver any
+		name     string
+		args     []reflect.Value
+	}{
+		{methodpkg.Receiver{N: 42}, "value", nil},
+		{&methodpkg.Receiver{N: 40}, "add", []reflect.Value{reflect.ValueOf(2)}},
+		{value, "value", nil},
+		{&value, "value", nil},
+		{&value, "add", []reflect.Value{reflect.ValueOf(0)}},
+	} {
+		t.Run(reflect.TypeOf(test.receiver).String()+"."+test.name, func(t *testing.T) {
+			receiver := reflect.ValueOf(test.receiver)
+			method, ok := reflectx.MethodByName(receiver.Type(), test.name)
+			if !ok || !method.Func.IsValid() {
+				t.Fatal("private method not found")
+			}
+			layout, err := m.layout(method.Func.Pointer(), false)
+			if err != nil || layout != reflect.TypeFor[struct{ F uintptr }]() {
+				t.Fatalf("private method layout: %v, %v", layout, err)
+			}
+			src := method.Func
+			var dst reflect.Value
+			roundtrip(t, &src, &dst)
+			runtime.GC()
+			if got := dst.Call(append([]reflect.Value{receiver}, test.args...))[0].Int(); got != 42 {
+				t.Fatalf("restored private method returned %d", got)
+			}
+		})
+	}
+	if len(m.scanned) != 0 {
+		t.Fatalf("method lookup scanned %d functions", len(m.scanned))
+	}
+	boundValue := methodpkg.Receiver{N: 42}.BoundValue()
+	var restoredValue func() int
+	roundtrip(t, &boundValue, &restoredValue)
+	if restoredValue() != 42 {
+		t.Fatal("bound method with escaped package prefix lost its receiver")
+	}
+	receiver := &methodpkg.Receiver{N: 40}
+	boundAdd := receiver.BoundAdd()
+	var restoredAdd func(int) int
+	roundtrip(t, &boundAdd, &restoredAdd)
+	if restoredAdd(2) != 42 || receiver.N != 40 {
+		t.Fatal("bound pointer method lost its receiver or source isolation")
+	}
+}
 
 func TestNativeMethodValues(t *testing.T) {
 	r := &nativeMethodReceiver{N: 42}
