@@ -142,7 +142,9 @@ func (m *nativeMetadata) layout(pc uintptr, captureFree bool) (reflect.Type, err
 		}
 		return typ, nil
 	}
-	if captureFree {
+	// The linker redirects dead methods to this capture-free throw stub.
+	// reflectx.MethodX can still expose it through a heap-allocated funcval.
+	if captureFree || name == "runtime.unreachableMethod" {
 		typ := reflect.TypeFor[struct{ F uintptr }]()
 		m.layouts[pc] = typ
 		return typ, nil
