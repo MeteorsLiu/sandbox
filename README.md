@@ -12,7 +12,9 @@ func main() {
 }
 ```
 
-Guest startup is internal to the library. A new guest executes Go runtime and package initialization, then enters the imported closure without executing the application's `main`. Initialization side effects must be appropriate there. Captured objects must be exclusively owned until `Run` returns. The function must finish its own goroutines before returning. Concurrent or nested host calls return an error.
+Guest startup is internal to the library. A new guest executes Go runtime and package initialization, then enters the imported closure without executing the application's `main`. Initialization side effects must be appropriate there. Captured objects must be exclusively owned until `Run` returns. The function must finish its own goroutines before returning. Concurrent and nested host calls are supported when their captured graphs are independent.
+
+`sandbox.Run` uses one global default Sandbox, initialized on first use and retained for the host process lifetime. Each explicit `Sandbox` likewise starts its Kernel on its first `Run` and reuses it until `Close`. Every call creates a fresh guest process, PID namespace, filesystem namespace, FD table and snapshot, and transfers the complete type and object graph. Guest processes are not pooled. `Close` rejects new calls, terminates active guests and waits for their calls to finish; repeated `Close` calls are safe. Do not call it from that Sandbox's inspector. Do not copy a used Sandbox or change its fields while calls are active; `Library` must remain unchanged after first use.
 
 ## Modules
 
@@ -26,7 +28,7 @@ github.com/xgo-dev/sandbox/testdata    integration test executable -> smoke
 
 Import `github.com/xgo-dev/sandbox` in the host. It loads `sentrylib.so` through `dlopen` and does not import the Sentry module or gVisor. Each module carries its own C ABI declarations so either module can be fetched independently. The ABI carries guest startup addresses, syscall registers and synchronous inspection and memory mapping callbacks.
 
-The C entry is `RunSandbox`. This host API requires `sentry/v0.5.0`: its first string contains startup JSON with the guest executable, filesystem configuration and environment. The `sentry/v0.4.0` backend ignores the environment field; earlier libraries expect an executable path instead of JSON and are incompatible. Build the host and Sentry from the same source revision. Go module version selection does not check the ABI of a library loaded through `dlopen`.
+The C entries are `CreateSandbox`, `RunSandbox` and `CloseSandbox`. This lifecycle ABI is incompatible with released backends through `sentry/v0.5.0`; build the host and Sentry from the same source revision. Older libraries are rejected because they lack the lifecycle entry points. Go module version selection does not check the ABI of a library loaded through `dlopen`.
 
 The sandbox module depends on ixgo for rebuilding interpreted closures. It does not depend on LLAR or gVisor. LLAR can continue using its own formula loader and pass an already loaded callback through the ordinary `Run` entry.
 
@@ -70,6 +72,7 @@ s := sandbox.Sandbox{
         {Type: "proc", Target: "/proc"},
     },
 }
+defer s.Close()
 err := s.Run(func() { f.OnBuild(ctx) })
 ```
 
@@ -79,7 +82,7 @@ err := s.Run(func() { f.OnBuild(ctx) })
 | --- | --- |
 | `bind` | Host directory, served through DirectFS. Writes persist in that host directory. Host permissions still apply. |
 | `tmpfs` | New Sentry filesystem for each call. Supports options such as `size`, `mode`, `uid` and `gid`; contents disappear when the call ends. |
-| `proc` | Process information from the guest's Sentry kernel. |
+| `proc` | Process information from this call's PID namespace. |
 | `overlay` | Combines already visible guest paths using `lowerdir` and optional `upperdir`. Writes go to the upper layer, whose filesystem determines persistence. |
 
 An empty `Mounts` retains the default read-only host `/` and guest `/proc`. A nonempty list replaces all defaults. Its first entry must mount `bind` or `tmpfs` at `/`; subsequent mounts are applied in order, so parents and overlay layers must precede their users. Duplicate targets and unsupported types return an error. Missing directory mountpoints are prepared through Sentry's synthetic-mountpoint support, which still requires a writable parent mount. For a read-only parent, prepare the target directory beforehand or place new mountpoints under a writable tmpfs. Bind sources currently must be directories.
@@ -107,6 +110,7 @@ Here `/tmp/merged` is the guest's source directory, and its changes disappear wi
 s := sandbox.Sandbox{
     Env: []string{"PATH=/usr/bin:/bin", "LANG=C", "HOME=/work"},
 }
+defer s.Close()
 err := s.Run(func() { f.OnBuild(ctx) })
 ```
 
@@ -129,10 +133,11 @@ s := sandbox.Sandbox{
         }
     },
 }
+defer s.Close()
 err := s.Run(fn)
 ```
 
-The default library is `sentrylib.so` beside the executable. One library remains loaded for the process lifetime. Inspector callbacks run synchronously in the original host Go runtime and are serialized; they must not access the captured objects while a call is active. An inspector panic is reported and prevents result writeback, but is not a mechanism for denying the syscall.
+The default library is `sentrylib.so` beside the executable. One library remains loaded for the process lifetime. Inspector callbacks run synchronously in the original host Go runtime and are serialized within each Run. Callbacks for different Runs may overlap, so shared inspector state needs synchronization. They must not access the captured objects while a call is active. An inspector panic is reported and prevents result writeback, but is not a mechanism for denying the syscall.
 
 `Name`, `Number` and the six raw `Args` are available without reading guest memory. The interceptor owns syscall argument parsing. It can change `Number` and `Args` directly before returning. There is no structured argument codec.
 
@@ -305,6 +310,7 @@ Use it as the host interceptor:
 
 ```go
 s := sandbox.Sandbox{Inspect: printSyscall}
+defer s.Close()
 err := s.Run(fn) // for example, fn calls os.ReadFile("/etc/hostname")
 ```
 
@@ -362,7 +368,7 @@ This is an executable module with a general `func()` entry, not yet a production
 
 `sentry/build-linux.sh` builds only the shared library and its C headers. The root `build-linux.sh` builds the integration program in [testdata/main.go](testdata/main.go), including the syscall-memory checks in [testdata/memory.go](testdata/memory.go), into `smoke`. It also builds the root module's value-transfer tests and checks that the host dependency list contains no gVisor packages. The [testdata/go.mod](testdata/go.mod) module uses a local `replace` directive to test the current checkout; it is not included by the root module's `go test ./...`. The root build script does not build the Sentry library.
 
-The smoke test covers automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting, nested-call rejection and unchanged stdin. It also checks for descriptor growth after warming the shared platform, guest path/buffer reads, raw syscall argument editing, invalid guest addresses and expired inspection access. Temporary-memory checks cover immediate visibility of host edits, zeroed anonymous allocations for longer path and buffer replacements, unchanged original guest bytes, explicit path and nested `writev` pointer replacement, cross-page data, concurrent calls, guest mapping cleanup and a panic after mapping memory.
+The smoke test covers Kernel reuse, concurrent guests with isolated tmpfs and procfs, Close with an active guest, nested calls on the same Kernel, automatic guest entry after package initialization without entering application `main`, integer capture, original host PID, GC, pointer/map aliases, cycles, slice growth, interfaces, nested native callbacks, mutation before dropping a reference, guest panic without writeback, static functions, syscall number rewriting and unchanged stdin. It also checks for descriptor growth after warming the shared platform, guest path/buffer reads, raw syscall argument editing, invalid guest addresses and expired inspection access. Temporary-memory checks cover immediate visibility of host edits, zeroed anonymous allocations for longer path and buffer replacements, unchanged original guest bytes, explicit path and nested `writev` pointer replacement, cross-page data, concurrent calls, guest mapping cleanup and a panic after mapping memory.
 
 The interpreted integration in [testdata/ixgo.go](testdata/ixgo.go) creates the method callback on the host, then verifies class state, reflection, package globals, a real file-read syscall, writeback and continued host execution. Transfer tests also cover multiple interpreters, interpreted source dependencies, local generic types, external native closure aliases, returned ixgo closures and malformed output without partial host mutation.
 

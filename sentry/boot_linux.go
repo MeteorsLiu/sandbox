@@ -18,7 +18,7 @@ package main
 
 // Adapted from runsc/boot/loader.go and pkg/sentry/fsimpl/testutil/kernel.go at
 // gVisor Go-export d1e35511e5a41ee5c2afc522d2f9b0c27cf8d382. Only startup for the
-// single guest is retained; gVisor library sources are unchanged.
+// embedded Kernel is retained; gVisor library sources are unchanged.
 
 import (
 	"fmt"
@@ -49,9 +49,9 @@ var platformOnce sync.Once
 var sharedPlatform platform.Platform
 var platformErr error
 
-// Systrap owns process-lifetime memory and stub pools. Reuse that platform while
-// creating a fresh kernel and per-call inspection wrapper for each guest.
-func newKernel(inspect inspector) (*kernel.Kernel, error) {
+// Systrap owns process-lifetime memory and stub pools. Each Sandbox owns a
+// Kernel; its fresh guest processes share that Kernel and platform.
+func newKernel(p *observedPlatform) (*kernel.Kernel, error) {
 	cpuid.Initialize()
 	seccheck.Initialize()
 	if err := rand.Init(); err != nil {
@@ -74,7 +74,7 @@ func newKernel(inspect inspector) (*kernel.Kernel, error) {
 	if platformErr != nil {
 		return nil, platformErr
 	}
-	p := &observedPlatform{Platform: sharedPlatform, inspect: inspect}
+	p.Platform = sharedPlatform
 	k := &kernel.Kernel{Platform: p}
 
 	memoryFD, err := memutil.CreateMemFD("llar-runtime-memory", 0)
@@ -117,5 +117,9 @@ func newKernel(inspect inspector) (*kernel.Kernel, error) {
 	}
 	defer hostFS.DecRef(ctx)
 	k.SetHostMount(k.VFS().NewDisconnectedMount(hostFS, nil, &vfs.MountOptions{}))
+	if err := registerFilesystems(k); err != nil {
+		k.Release()
+		return nil, err
+	}
 	return k, nil
 }

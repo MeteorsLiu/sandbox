@@ -26,7 +26,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var runMu sync.Mutex
+var libraryMu sync.Mutex
 
 type inspection struct {
 	mu  sync.Mutex
@@ -82,19 +82,18 @@ func sandboxInspect(owner C.uintptr_t, event *C.struct_syscall_event) {
 // Run executes fn in a fresh guest running the same ELF. The guest enters the
 // closure automatically after package initialization, without running main.
 // Capture mutations are committed only after a successful guest exit.
-// Captures must be exclusively owned for the duration of Run. Calls cannot
-// overlap because the embedded Sentry runtime owns process-wide resources.
+// Captures must be exclusively owned for the duration of Run. Calls may overlap
+// when their captured graphs are independent. Configuration must not change
+// until all active calls return.
 func (s *Sandbox) Run(fn func()) error {
 	if fn == nil {
 		return fmt.Errorf("sandbox: nil function")
 	}
-	if !runMu.TryLock() {
-		return fmt.Errorf("sandbox: another Run is active")
+	handleID, err := s.acquire()
+	if err != nil {
+		return err
 	}
-	defer runMu.Unlock()
-	if !validRseqSetting(os.Getenv("GLIBC_TUNABLES")) {
-		return fmt.Errorf("sandbox: start the process with GLIBC_TUNABLES=glibc.pthread.rseq=0")
-	}
+	defer s.active.Done()
 	mainPC, err := guestMain()
 	if err != nil {
 		return err
@@ -113,18 +112,6 @@ func (s *Sandbox) Run(fn func()) error {
 	}
 	defer runtime.KeepAlive(&graph)
 	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	library := s.Library
-	if library == "" {
-		library = filepath.Join(filepath.Dir(executable), "sentrylib.so")
-	}
-	library, err = filepath.EvalSymlinks(library)
-	if err != nil {
-		return err
-	}
-	library, err = filepath.Abs(library)
 	if err != nil {
 		return err
 	}
@@ -147,8 +134,7 @@ func (s *Sandbox) Run(fn func()) error {
 	if err != nil {
 		return fmt.Errorf("sandbox configuration: %w", err)
 	}
-	cLibrary, cConfig := C.CString(library), C.CString(string(config))
-	defer C.free(unsafe.Pointer(cLibrary))
+	cConfig := C.CString(string(config))
 	defer C.free(unsafe.Pointer(cConfig))
 	i := &inspection{fn: s.Inspect}
 	var handle cgo.Handle
@@ -157,7 +143,7 @@ func (s *Sandbox) Run(fn func()) error {
 		defer handle.Delete()
 	}
 	var message [4096]C.char
-	code := C.sandbox_load(cLibrary, cConfig, C.int(fd), C.uintptr_t(mainPC), C.uintptr_t(entryPC), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
+	code := C.sandbox_run(C.uintptr_t(handleID), cConfig, C.int(fd), C.uintptr_t(mainPC), C.uintptr_t(entryPC), C.uintptr_t(handle), &message[0], C.size_t(len(message)))
 	if code != 0 {
 		return fmt.Errorf("sandbox Sentry: %s", C.GoString(&message[0]))
 	}
@@ -175,6 +161,76 @@ func (s *Sandbox) Run(fn func()) error {
 		return fmt.Errorf("sandbox import: %w", err)
 	}
 	return nil
+}
+
+func (s *Sandbox) acquire() (uintptr, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, fmt.Errorf("sandbox: closed")
+	}
+	if s.kernel == 0 {
+		if !validRseqSetting(os.Getenv("GLIBC_TUNABLES")) {
+			return 0, fmt.Errorf("sandbox: start the process with GLIBC_TUNABLES=glibc.pthread.rseq=0")
+		}
+		library := s.Library
+		if library == "" {
+			executable, err := os.Executable()
+			if err != nil {
+				return 0, err
+			}
+			library = filepath.Join(filepath.Dir(executable), "sentrylib.so")
+		}
+		library, err := filepath.EvalSymlinks(library)
+		if err != nil {
+			return 0, err
+		}
+		library, err = filepath.Abs(library)
+		if err != nil {
+			return 0, err
+		}
+		cLibrary := C.CString(library)
+		defer C.free(unsafe.Pointer(cLibrary))
+		var handle C.uintptr_t
+		var message [4096]C.char
+		libraryMu.Lock()
+		code := C.sandbox_create(cLibrary, &handle, &message[0], C.size_t(len(message)))
+		libraryMu.Unlock()
+		if code != 0 {
+			return 0, fmt.Errorf("sandbox Sentry: %s", C.GoString(&message[0]))
+		}
+		s.kernel = uintptr(handle)
+	}
+	s.active.Add(1)
+	return s.kernel, nil
+}
+
+// Close rejects new calls, terminates active guests, and waits for their Run
+// calls and resources to finish. It is idempotent. Do not call Close from an
+// inspector belonging to this Sandbox: Close waits for that callback to return.
+func (s *Sandbox) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.mu.Unlock()
+		<-done
+		return s.closeErr
+	}
+	s.closed = true
+	s.closeDone = make(chan struct{})
+	handle := s.kernel
+	s.mu.Unlock()
+	var err error
+	if handle != 0 {
+		var message [4096]C.char
+		if C.sandbox_close(C.uintptr_t(handle), &message[0], C.size_t(len(message))) != 0 {
+			err = fmt.Errorf("sandbox Sentry: %s", C.GoString(&message[0]))
+		}
+	}
+	s.active.Wait()
+	s.closeErr = err
+	close(s.closeDone)
+	return err
 }
 
 func validRseqSetting(value string) bool {

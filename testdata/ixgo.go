@@ -59,6 +59,7 @@ func inspectIxgo() error {
 			reads.Add(1)
 		}
 	}}
+	defer s.Close()
 	if err := s.Run(func() { holder.OnBuild(&n) }); err != nil {
 		return fmt.Errorf("host-created ixgo closure: %w", err)
 	}

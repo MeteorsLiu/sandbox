@@ -18,11 +18,15 @@ struct syscall_event {
     char *failure;
 };
 typedef void (*inspect_fn)(uintptr_t, struct syscall_event *);
-// The first string is the startup JSON (guest executable, mounts and env).
-typedef int (*run_sentry_fn)(char *, int, uintptr_t, uintptr_t, uintptr_t,
+typedef int (*create_sentry_fn)(uintptr_t *, char *, size_t);
+typedef int (*close_sentry_fn)(uintptr_t, char *, size_t);
+// Each run receives a Kernel handle and startup JSON (guest, mounts and env).
+typedef int (*run_sentry_fn)(uintptr_t, char *, int, uintptr_t, uintptr_t, uintptr_t,
                              inspect_fn, char *, size_t);
 
-int RunSandbox(char *config, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
+int CreateSandbox(uintptr_t *kernel, char *message, size_t capacity);
+int CloseSandbox(uintptr_t kernel, char *message, size_t capacity);
+int RunSandbox(uintptr_t kernel, char *config, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
                  uintptr_t owner, inspect_fn inspect, char *message, size_t capacity);
 
 char *MMapSyscallMemory(uintptr_t, uint64_t, size_t, struct syscall_memory *);

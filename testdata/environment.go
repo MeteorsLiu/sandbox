@@ -24,6 +24,8 @@ func checkEnvironment() error {
 			os.Unsetenv(key)
 		}
 	}()
+	var s sandbox.Sandbox
+	defer s.Close()
 	for _, test := range []struct {
 		name, host, want string
 		env              []string
@@ -42,7 +44,7 @@ func checkEnvironment() error {
 		}
 		var actual []string
 		var initial, child string
-		s := sandbox.Sandbox{Env: test.env}
+		s.Env = test.env
 		if err := s.Run(func() {
 			actual = os.Environ()
 			initial = environmentAtInit
@@ -66,6 +68,7 @@ func checkEnvironment() error {
 		}
 	}
 	invalid := sandbox.Sandbox{Env: []string{"INVALID=before\x00after"}}
+	defer invalid.Close()
 	if err := invalid.Run(staticCall); err == nil || !strings.Contains(err.Error(), "guest environment contains NUL") {
 		return fmt.Errorf("environment NUL was not rejected: %v", err)
 	}
@@ -78,6 +81,7 @@ func checkErrorMessage() error {
 		{Type: "bind", Source: "/", Target: "/"},
 		{Type: strings.Repeat("x", 8192), Target: "/invalid"},
 	}}
+	defer s.Close()
 	err := s.Run(staticCall)
 	if err == nil {
 		return fmt.Errorf("unsupported filesystem accepted")

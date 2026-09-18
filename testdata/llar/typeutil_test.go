@@ -37,6 +37,7 @@ func TestTypeutilMapSandbox(t *testing.T) {
 			m.Set(types.NewPointer(key), m)
 			completed := false
 			s := sandbox.Sandbox{Library: library}
+			defer s.Close()
 			if err := s.Run(func() {
 				if m.At(key) != 42 || m.At(types.NewPointer(key)) != m || m.Len() != 2 {
 					panic("type map lost its entries or self-reference")

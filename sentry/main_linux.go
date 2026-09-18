@@ -22,24 +22,88 @@ import (
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/watchdog"
 )
 
-var libraryMu sync.Mutex
+var kernels = struct {
+	sync.Mutex
+	next uintptr
+	live map[uintptr]*sentryKernel
+}{live: make(map[uintptr]*sentryKernel)}
 
-//export RunSandbox
-func RunSandbox(config *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
-	libraryMu.Lock()
-	defer libraryMu.Unlock()
+func reportError(err error, message *C.char, capacity C.size_t) C.int {
+	if err == nil {
+		return 0
+	}
+	if capacity > 0 {
+		buf := unsafe.Slice((*byte)(unsafe.Pointer(message)), int(capacity))
+		n := copy(buf[:len(buf)-1], err.Error())
+		buf[n] = 0
+	}
+	return 1
+}
+
+//export CreateSandbox
+func CreateSandbox(handle *C.uintptr_t, message *C.char, capacity C.size_t) C.int {
+	kernels.Lock()
+	defer kernels.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	log.SetLevel(log.Warning)
+	installSyscallMemory()
+	p := &observedPlatform{processes: make(map[string]*guestProcess)}
+	k, err := newKernel(p)
+	if err != nil {
+		return reportError(err, message, capacity)
+	}
+	if err := k.Start(); err != nil {
+		k.Release()
+		return reportError(err, message, capacity)
+	}
+	dog := watchdog.New(k, watchdog.DefaultOpts)
+	dog.Start()
+	kernels.next++
+	kernels.live[kernels.next] = &sentryKernel{kernel: k, platform: p, dog: dog}
+	*handle = C.uintptr_t(kernels.next)
+	return 0
+}
+
+//export CloseSandbox
+func CloseSandbox(handle C.uintptr_t, message *C.char, capacity C.size_t) C.int {
+	kernels.Lock()
+	s := kernels.live[uintptr(handle)]
+	delete(kernels.live, uintptr(handle))
+	kernels.Unlock()
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	s.closed = true
+	s.kernel.Kill(linux.WaitStatusExit(1))
+	s.mu.Unlock()
+	s.runs.Wait()
+	s.kernel.WaitExited()
+	s.dog.Stop()
+	s.kernel.Release()
+	return 0
+}
+
+//export RunSandbox
+func RunSandbox(handle C.uintptr_t, config *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_t, callback C.inspect_fn, message *C.char, capacity C.size_t) (code C.int) {
+	kernels.Lock()
+	s := kernels.live[uintptr(handle)]
+	if s != nil {
+		s.runs.Add(1)
+	}
+	kernels.Unlock()
+	if s == nil {
+		return reportError(errors.New("sandbox is closed"), message, capacity)
+	}
+	defer s.runs.Done()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	report := func(err error) {
-		code = 1
-		if capacity > 0 {
-			buf := unsafe.Slice((*byte)(unsafe.Pointer(message)), int(capacity))
-			n := copy(buf[:len(buf)-1], err.Error())
-			buf[n] = 0
-		}
+		code = reportError(err, message, capacity)
 	}
 	defer func() {
 		if v := recover(); v != nil {
@@ -55,10 +119,9 @@ func RunSandbox(config *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_
 		report(fmt.Errorf("Sentry startup configuration: %w", err))
 		return code
 	}
-	installSyscallMemory()
 	var inspectionMu sync.Mutex
 	var inspectionErr error
-	err := runSentry(startup.Mounts, startup.Guest, startup.Env, int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, ac *arch.Context64) error {
+	err := s.run(startup.Mounts, startup.Guest, startup.Env, int(imageFD), uintptr(mainPC), uintptr(entryPC), func(ctx gcontext.Context, ac *arch.Context64) error {
 		if callback == nil {
 			return nil
 		}
@@ -96,7 +159,7 @@ func RunSandbox(config *C.char, imageFD C.int, mainPC, entryPC, owner C.uintptr_
 				inspectionErr = err
 			}
 			inspectionMu.Unlock()
-			task.Kernel().Kill(linux.WaitStatusExit(1))
+			_ = task.Kernel().SendContainerSignal(task.ContainerID(), &linux.SignalInfo{Signo: int32(linux.SIGKILL)})
 			return err
 		}
 		var args [6]uint64
