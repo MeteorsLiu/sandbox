@@ -376,20 +376,29 @@ func (*channelData) load(r *reader) object {
 // functionValue identifies code in the same executable and the closure storage
 // in the object graph. Env references preserve shared and recursive closures.
 // A nonzero PC with Env.Root == 0 has no captures; Load creates only a PC word.
-// For reflect.makeFuncStub, Env refers to the callback slot; the destination
-// function type supplies the signature used to rebuild the MakeFunc wrapper.
+// For reflect.makeFuncStub, Env refers to the callback slot and Type records
+// the internal signature, which may differ from the outer function type.
 type functionValue struct {
-	PC  uintValue
-	Env refValue
+	PC   uintValue
+	Env  refValue
+	Type typeSpec
 }
 
 func (f *functionValue) save(w *writer) {
 	f.PC.save(w)
 	f.Env.save(w)
+	boolValue(f.Type != nil).save(w)
+	if f.Type != nil {
+		saveTypeSpec(w, f.Type)
+	}
 }
 
 func (*functionValue) load(r *reader) object {
-	return &functionValue{PC: loadUint(r), Env: loadRef(r)}
+	f := &functionValue{PC: loadUint(r), Env: loadRef(r)}
+	if loadBool(r) {
+		f.Type = loadTypeSpec(r)
+	}
+	return f
 }
 
 // reflectTypeValue represents a type itself, without traversing *reflect.rtype.

@@ -10,7 +10,143 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+
+	"github.com/visualfc/xtype"
 )
+
+type makeFuncPoint struct{ X, Y int }
+type makeFuncOtherPoint struct{ X, Y int }
+
+type makeFuncSignatureValues struct {
+	Outer     func(*makeFuncOtherPoint, int) *makeFuncOtherPoint
+	Inner     func(*makeFuncPoint, int) *makeFuncPoint
+	Reflected reflect.Value
+	Point     *makeFuncPoint
+}
+
+func newMakeFuncSignatureValues() makeFuncSignatureValues {
+	point := &makeFuncPoint{100, 200}
+	inner := reflect.MakeFunc(reflect.TypeFor[func(*makeFuncPoint, int) *makeFuncPoint](), func(args []reflect.Value) []reflect.Value {
+		p := args[0].Interface().(*makeFuncPoint)
+		if p != point {
+			panic("MakeFunc argument lost its captured pointer alias")
+		}
+		p.X += int(args[1].Int())
+		return []reflect.Value{reflect.ValueOf(p)}
+	})
+	outer := xtype.ConvertFuncValue(xtype.TypeOfType(reflect.TypeFor[func(*makeFuncOtherPoint, int) *makeFuncOtherPoint]()), inner)
+	return makeFuncSignatureValues{
+		Outer:     outer.Interface().(func(*makeFuncOtherPoint, int) *makeFuncOtherPoint),
+		Inner:     inner.Interface().(func(*makeFuncPoint, int) *makeFuncPoint),
+		Reflected: outer,
+		Point:     point,
+	}
+}
+
+func TestMakeFuncReinterpretedSignature(t *testing.T) {
+	for _, first := range []string{"outer", "inner"} {
+		t.Run(first, func(t *testing.T) {
+			values := newMakeFuncSignatureValues()
+			if values.Outer((*makeFuncOtherPoint)(values.Point), 0) != (*makeFuncOtherPoint)(values.Point) {
+				t.Fatal("source function lost its result alias")
+			}
+			src := []any{values.Outer, values.Inner, values.Reflected, values.Point}
+			if first == "inner" {
+				src[0], src[1] = src[1], src[0]
+			}
+			var dst []any
+			roundtrip(t, &src, &dst)
+			if first == "inner" {
+				dst[0], dst[1] = dst[1], dst[0]
+			}
+			runtime.GC()
+			outer := dst[0].(func(*makeFuncOtherPoint, int) *makeFuncOtherPoint)
+			inner := dst[1].(func(*makeFuncPoint, int) *makeFuncPoint)
+			reflected := dst[2].(reflect.Value)
+			point := dst[3].(*makeFuncPoint)
+			if outer((*makeFuncOtherPoint)(point), 2) != (*makeFuncOtherPoint)(point) || inner(point, 3) != point {
+				t.Fatal("restored function lost its result alias")
+			}
+			result := reflected.Call([]reflect.Value{reflect.ValueOf((*makeFuncOtherPoint)(point)), reflect.ValueOf(4)})
+			if result[0].Interface().(*makeFuncOtherPoint) != (*makeFuncOtherPoint)(point) || point.X != 109 || values.Point.X != 100 {
+				t.Fatal("restored signatures lost their captures or source isolation")
+			}
+			callback := makeFuncCallback(reflect.ValueOf(inner)).Addr().Pointer()
+			for _, fn := range []reflect.Value{reflect.ValueOf(outer), reflected} {
+				if makeFuncCallback(fn).Addr().Pointer() != callback {
+					t.Fatal("different signature views no longer share one MakeFunc")
+				}
+			}
+		})
+	}
+}
+
+func TestMakeFuncReinterpretedProcess(t *testing.T) {
+	const imageEnv = "SANDBOX_STATE_MAKEFUNC_SIGNATURE_IMAGE"
+	ctx := context.Background()
+	if path := os.Getenv(imageEnv); path != "" {
+		input, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var graph State
+		var guest makeFuncSignatureValues
+		if _, err := graph.Load(ctx, input, &guest); err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		if guest.Outer((*makeFuncOtherPoint)(guest.Point), 5).X != 105 || guest.Inner(guest.Point, 7).X != 112 {
+			t.Fatal("child function lost its internal signature or capture")
+		}
+		loaded := graph.loaded
+		mem := make([]byte, 1<<20)
+		n, _, err := graph.Save(ctx, mem, &guest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if graph.saved.lastID != objectID(len(loaded.objectsByID)) {
+			t.Fatal("MakeFunc signature views acquired new object IDs")
+		}
+		if err := os.WriteFile(path, mem[:n], 0600); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	var graph State
+	host := newMakeFuncSignatureValues()
+	point, original := host.Point, host.Outer
+	mem := make([]byte, 1<<20)
+	n, _, err := graph.Save(ctx, mem, &host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "makefunc.state")
+	if err := os.WriteFile(path, mem[:n], 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestMakeFuncReinterpretedProcess$")
+	command.Env = append(os.Environ(), imageEnv+"="+path)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("child: %v\n%s", err, output)
+	}
+	if point.X != 100 {
+		t.Fatal("child changed host memory before writeback")
+	}
+	returned, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := graph.Load(ctx, returned, &host); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	if host.Point != point || point.X != 112 || original((*makeFuncOtherPoint)(point), 1).X != 113 || host.Inner(point, 2).X != 115 {
+		t.Fatal("writeback lost host pointer identity or the original function capture")
+	}
+	if makeFuncCallback(reflect.ValueOf(host.Outer)).Addr().Pointer() != makeFuncCallback(reflect.ValueOf(host.Inner)).Addr().Pointer() {
+		t.Fatal("writeback split the function's signature views")
+	}
+}
 
 func TestMakeFuncCaptures(t *testing.T) {
 	n := 40
