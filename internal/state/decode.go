@@ -174,6 +174,7 @@ type decodeState struct {
 	native       nativeState
 	functions    []decodedFunction
 	makeFuncs    map[reflect.Value]reflect.Value // Callback slots to MakeFunc wrappers.
+	methodValues map[reflect.Value]reflect.Value // Method environments to reflected function wrappers.
 	typeutilMaps []typeutilMap                   // Rehash after all key objects have been decoded.
 
 	// objectByID is the set of objects in progress.
@@ -934,6 +935,14 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	}
 	for callback, fn := range ds.makeFuncs {
 		makeFuncCallback(fn).Set(callback)
+	}
+	for storage, fn := range ds.methodValues {
+		env := storage.Addr().Interface().(*methodValueEnv)
+		method := env.receiver.Method(env.method)
+		if !method.Type().ConvertibleTo(fn.Type()) {
+			Failf("restored method has type %v, want %v", method.Type(), fn.Type())
+		}
+		*methodValueStorage(fn) = *methodValueStorage(method.Convert(fn.Type()))
 	}
 	for _, m := range ds.typeutilMaps {
 		rehashTypeutilMap(m)
