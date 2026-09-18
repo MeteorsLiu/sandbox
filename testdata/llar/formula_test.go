@@ -57,6 +57,7 @@ func TestFormulaSandbox(t *testing.T) {
 					{Type: "proc", Target: "/proc"},
 				},
 			}
+			defer s.Close()
 			err = s.Run(func() {
 				if filter != nil {
 					accepted = filter()

@@ -71,6 +71,7 @@ func runSandbox(t *testing.T, fn func()) error {
 		t.Fatal("SANDBOX_TEST_LIBRARY must point to the matching Sentry shared library")
 	}
 	s := sandbox.Sandbox{Library: library}
+	defer s.Close()
 	return s.Run(fn)
 }
 

@@ -28,10 +28,14 @@ The workflow can also be dispatched with an existing Sentry tag to retry a faile
 ## C Entry
 
 ```c
-int RunSandbox(char *config, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
+int CreateSandbox(uintptr_t *kernel, char *message, size_t capacity);
+int RunSandbox(uintptr_t kernel, char *config, int image_fd, uintptr_t main_pc, uintptr_t entry_pc,
                  uintptr_t owner, inspect_fn inspect, char *message, size_t capacity);
+int CloseSandbox(uintptr_t kernel, char *message, size_t capacity);
 ```
 
+- `CreateSandbox` starts one Kernel and returns its opaque handle. `RunSandbox` creates a fresh process under that Kernel, with independent PID and mount namespaces, FD table and inspection state. Calls may overlap. The internal task identity is inherited by guest children so inspection and cleanup remain scoped to the originating Run.
+- `CloseSandbox` rejects further calls, terminates tasks, waits for active runs and releases the Kernel. The caller must wait for its inspector callbacks to return; closing a Kernel synchronously from one of its own callbacks would deadlock.
 - `config` is a NUL-terminated JSON object containing `guest` (the executable's absolute guest path), `mounts` and `env` (an array of `KEY=value` strings). Sentry starts the executable with that path as `argv[0]` and no extra arguments. Mount entries contain `type`, optional `source`, `target` and optional `options` (an array of strings). Environment entries are passed directly to the new process before runtime initialization; NUL is rejected. Missing, null or empty `env` gives an empty environment at this C entry. The Go host implements `Sandbox.Env == nil` inheritance by explicitly sending its own `os.Environ()`.
 - `image_fd` is a caller-owned descriptor imported as guest fd 3. The library does not interpret its contents. Guest fd 0, 1 and 2 are imported from host stdin, stdout and stderr.
 - `main_pc` is the guest virtual address to redirect; the caller supplies its `main.main` address. The caller must verify that the symbol contains at least 5 bytes on AMD64 or 4 bytes on ARM64. Before starting guest tasks, the library writes a relative branch into this private executable mapping using Sentry's existing memory manager.
@@ -40,9 +44,9 @@ int RunSandbox(char *config, int image_fd, uintptr_t main_pc, uintptr_t entry_pc
 - `inspect` is an optional synchronous callback. It receives a borrowed `syscall_event` containing the syscall number, name, six arguments and a memory mapping callback. The caller owns argument parsing and may change the registers directly. A null callback skips inspection setup. Guest pointer arguments must not be dereferenced in the host.
 - `message` is a caller-owned writable error buffer of `capacity` bytes. For nonzero capacity, errors are truncated to at most `capacity - 1` bytes and NUL-terminated. No bytes are written at zero capacity. A nonzero result indicates an error; zero means that the guest exited successfully.
 
-All supplied strings, buffers and callback state must remain valid until `RunSandbox` returns. Each event, its name and its context handle are borrowed only for the duration of `inspect`. Calls are serialized inside the library. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime.
+All supplied strings, buffers and callback state must remain valid until `RunSandbox` returns. Each event, its name and its context handle are borrowed only for the duration of `inspect`. Load one library per host process and keep it loaded: its Go runtime and Systrap workers retain executable code for the process lifetime, even after all Kernels are closed.
 
-The C entry name stays `RunSandbox`; releases use Go module version tags. In `sentry/v0.4.0`, the first string changes from an executable path to startup JSON. In `sentry/v0.5.0`, the JSON gains `env`; the C parameter types and syscall callback layout remain unchanged. The v0.4.0 backend ignores `env`, so environment configuration requires v0.5.0 or later. An older path is rejected as invalid JSON; an older backend cannot interpret the new configuration as an executable path. The earlier `sentry/v0.1.0` library also has an incompatible C signature and must not be loaded. Go module version selection does not validate a library loaded with `dlopen`.
+The lifecycle entry points and leading Kernel handle change the C ABI. Backends through `sentry/v0.5.0` are incompatible and lack `CreateSandbox`/`CloseSandbox`. Build both modules from the same source revision. Go module version selection does not validate a library loaded with `dlopen`.
 
 Example startup configuration:
 

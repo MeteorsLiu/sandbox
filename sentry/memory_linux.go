@@ -191,13 +191,13 @@ func finishSyscallMemory(m *syscallMemory) error {
 
 // Restart blocks and signal frames can retain addresses after an execution
 // attempt ends. Keep those mappings, and calls skipped before dispatch, until
-// the kernel has stopped all tasks. Release before Kernel.Release destroys MM
-// backing resources. The extra MM user also covers successful execve.
-func releaseSyscallMemory(k *kernel.Kernel) error {
+// this Run has stopped all its tasks. The extra MM user also covers successful
+// execve. Other concurrent Runs retain their own mappings.
+func releaseSyscallMemory(k *kernel.Kernel, processID string) error {
 	memoryCalls.Lock()
 	var remaining []*syscallMemory
 	for m := range memoryCalls.live {
-		if m.task.Kernel() == k {
+		if m.task.Kernel() == k && m.task.ContainerID() == processID {
 			remaining = append(remaining, m)
 		}
 	}

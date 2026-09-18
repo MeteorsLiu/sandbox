@@ -126,6 +126,7 @@ func inspectTemporaryMemory() error {
 		}
 	}}
 	var content string
+	defer s.Close()
 	if err := s.Run(func() {
 		data, err := os.ReadFile(original)
 		if err != nil {
@@ -186,6 +187,7 @@ func inspectTemporaryMemory() error {
 			panic("mapped inspection failure")
 		}
 	}}
+	defer failing.Close()
 	err = failing.Run(func() {
 		unix.Write(-1, []byte("panic payload"))
 		n = 1

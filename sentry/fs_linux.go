@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/lisafs"
@@ -58,7 +59,7 @@ type mount struct {
 	stop func()
 }
 
-// Bind connections outlive the kernel and its mount namespace. Release them
+// Bind connections outlive the guest and its mount namespace. Release them
 // last, including connections prepared before a later mount fails.
 func closeMounts(mounts []mount) {
 	for i := len(mounts) - 1; i >= 0; i-- {
@@ -188,17 +189,21 @@ func startFilesystem(root string, readOnly bool) (*fd.FD, func(), error) {
 	}, nil
 }
 
-func mountFilesystem(k *kernel.Kernel, mounts []mount) (_ *vfs.MountNamespace, err error) {
-	ctx := k.SupervisorContext()
-	creds := auth.NewRootCredentials(k.RootUserNamespace())
+func registerFilesystems(k *kernel.Kernel) error {
 	vfsObj := k.VFS()
 	if err := memdev.Register(vfsObj); err != nil {
-		return nil, fmt.Errorf("registering memory devices: %w", err)
+		return fmt.Errorf("registering memory devices: %w", err)
 	}
 	vfsObj.MustRegisterFilesystemType(gofer.Name, &gofer.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
 	vfsObj.MustRegisterFilesystemType(proc.Name, &proc.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
 	vfsObj.MustRegisterFilesystemType(tmpfs.Name, &tmpfs.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
 	vfsObj.MustRegisterFilesystemType(overlay.Name, &overlay.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
+	return nil
+}
+
+func mountFilesystem(ctx context.Context, k *kernel.Kernel, mounts []mount) (_ *vfs.MountNamespace, err error) {
+	creds := auth.NewRootCredentials(k.RootUserNamespace())
+	vfsObj := k.VFS()
 	var mntns *vfs.MountNamespace
 	var root vfs.VirtualDentry
 	defer func() {

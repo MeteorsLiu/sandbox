@@ -62,6 +62,7 @@ func runProgram(path string) (int, error) {
 	var runError string
 	var completed bool
 	s := sandbox.Sandbox{Library: library}
+	defer s.Close()
 	err = s.Run(func() {
 		os.Args = []string{dir}
 		var err error

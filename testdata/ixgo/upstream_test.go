@@ -57,6 +57,7 @@ func TestUpstreamPrograms(t *testing.T) {
 			fn := value.(func())
 			completed := false
 			s := sandbox.Sandbox{Library: library}
+			defer s.Close()
 			if err := s.Run(func() { fn(); completed = true }); err != nil {
 				t.Fatal(err)
 			}

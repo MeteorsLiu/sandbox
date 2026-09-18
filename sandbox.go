@@ -2,6 +2,8 @@
 // captured object graph back to the caller. See README.md for transfer limits.
 package sandbox
 
+import "sync"
+
 // Syscall is a trapped guest syscall, observed after Context.Switch returns and
 // before Sentry dispatches it. Addresses in Args belong to the guest.
 type Syscall struct {
@@ -20,8 +22,11 @@ type Mount struct {
 	Options []string `json:"options,omitempty"`
 }
 
-// Sandbox selects the shared library, guest mounts, environment and inspector.
-// Library defaults to sentrylib.so beside the calling executable.
+// Sandbox owns a Kernel shared by its Run calls. The zero value is ready for
+// use; the first Run starts the Kernel. Close releases it. Do not copy a Sandbox
+// after first use or modify its configuration while a Run is active.
+// Library defaults to sentrylib.so beside the calling executable and must not
+// change after the first Run.
 type Sandbox struct {
 	Library string
 	// An empty Mounts uses a read-only host root and guest procfs. Otherwise
@@ -32,7 +37,16 @@ type Sandbox struct {
 	// the host environment at each Run; a non-nil slice replaces it entirely.
 	// An empty non-nil slice starts the guest with no environment variables.
 	Env []string
+
+	mu        sync.Mutex
+	kernel    uintptr
+	active    sync.WaitGroup
+	closed    bool
+	closeDone chan struct{}
+	closeErr  error
 }
 
-// Run executes fn using the default Sandbox.
-func Run(fn func()) error { return new(Sandbox).Run(fn) }
+var defaultSandbox Sandbox
+
+// Run executes fn using a process-lifetime default Sandbox.
+func Run(fn func()) error { return defaultSandbox.Run(fn) }

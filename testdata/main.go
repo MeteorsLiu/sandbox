@@ -38,6 +38,9 @@ func main() {
 }
 
 func run() error {
+	if err := checkKernelLifecycle(); err != nil {
+		return fmt.Errorf("kernel lifecycle: %w", err)
+	}
 	if err := checkEnvironment(); err != nil {
 		return err
 	}
@@ -46,6 +49,7 @@ func run() error {
 	}
 	var calls atomic.Int64
 	s := sandbox.Sandbox{Inspect: func(call *sandbox.Syscall) { calls.Add(1) }}
+	defer s.Close()
 	n := 41
 	pid := os.Getpid()
 	if err := s.Run(func() {
@@ -103,7 +107,7 @@ func run() error {
 	if err := s.Run(staticCall); err != nil {
 		return fmt.Errorf("static function: %w", err)
 	}
-	fmt.Println("PASS static function and repeated Sentry startup")
+	fmt.Println("PASS static function and repeated guest startup")
 	for range 3 {
 		if err := s.Run(staticCall); err != nil {
 			return err
@@ -126,12 +130,14 @@ func run() error {
 	fmt.Printf("PASS repeated-call descriptor count=%d\n", len(fdAfter))
 	var guestPID uintptr
 	var nestedErr error
-	rewriter := sandbox.Sandbox{Inspect: func(call *sandbox.Syscall) {
+	var rewriter sandbox.Sandbox
+	rewriter.Inspect = func(call *sandbox.Syscall) {
 		if call.Number == 0xfffffff0 {
-			nestedErr = sandbox.Run(staticCall)
+			nestedErr = rewriter.Run(staticCall)
 			call.Number = unix.SYS_GETPID
 		}
-	}}
+	}
+	defer rewriter.Close()
 	if err := rewriter.Run(func() {
 		result, _, errno := unix.RawSyscall(0xfffffff0, 0, 0, 0)
 		if errno != 0 {
@@ -141,8 +147,8 @@ func run() error {
 	}); err != nil {
 		return fmt.Errorf("syscall rewrite: %w", err)
 	}
-	check(guestPID == 1 && nestedErr != nil, "syscall rewrite/nested Run guard")
-	fmt.Println("PASS syscall number rewrite and nested Run rejection")
+	check(guestPID == 1 && nestedErr == nil, fmt.Sprintf("syscall rewrite/nested Run: %v", nestedErr))
+	fmt.Println("PASS syscall number rewrite and nested Run on the same Kernel")
 
 	var mu sync.Mutex
 	if err := s.Run(func() { mu.Lock(); mu.Unlock() }); err != nil {
@@ -246,6 +252,7 @@ func inspectMemory() error {
 	}}
 	var content, received string
 	var written int
+	defer s.Close()
 	err = s.Run(func() {
 		data, err := os.ReadFile(path)
 		if err != nil {
