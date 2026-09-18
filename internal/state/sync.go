@@ -24,10 +24,11 @@ func syncFields(obj reflect.Value) ([]reflect.Value, bool) {
 	if pkg == "sync" && typ != reflect.TypeFor[sync.Map]() || pkg == "internal/sync" && name == "Mutex" {
 		return nil, true
 	}
-	if pkg != "sync/atomic" {
+	pointer := strings.HasPrefix(name, "Pointer[")
+	// ixgo's generic Pointer patch retains the same [0]*T marker and v slot.
+	if pkg != "sync/atomic" && (pkg != "sync/atomic@patch" || !pointer) {
 		return nil, false
 	}
-	pointer := strings.HasPrefix(name, "Pointer[")
 	if !pointer {
 		switch name {
 		case "Bool", "Int32", "Int64", "Uint32", "Uint64", "Uintptr", "Value":
