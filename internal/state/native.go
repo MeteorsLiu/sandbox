@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"runtime"
 	"unsafe"
+
+	"github.com/visualfc/xtype"
 )
 
 //go:linkname nativeReflectType reflect.toType
@@ -17,8 +19,8 @@ var makeFuncPC = reflect.MakeFunc(reflect.TypeFor[func()](), nil).Pointer()
 var methodValuePC = reflect.ValueOf(reflect.Value{}).MethodByName("IsValid").Pointer()
 
 // Go 1.26.6 reflect.makeFuncImpl on linux/amd64 and linux/arm64. Both
-// architectures use a two-byte abi.IntArgRegBitmap. Only fn is transferred;
-// reflect.MakeFunc reconstructs the other fields in the receiving runtime.
+// architectures use a two-byte abi.IntArgRegBitmap. Transfer fn and ftyp's
+// type reference; reflect.MakeFunc reconstructs the local call layout.
 type makeFuncImpl struct {
 	code    uintptr
 	stack   unsafe.Pointer
@@ -55,7 +57,7 @@ func methodValueStorage(obj reflect.Value) *methodValueImpl {
 	return *(**methodValueImpl)(obj.Addr().UnsafePointer())
 }
 
-func makeFuncCallback(obj reflect.Value) reflect.Value {
+func makeFuncStorage(obj reflect.Value) *makeFuncImpl {
 	if _, err := executableNativeMetadata(); err != nil {
 		Failf("MakeFunc metadata: %w", err)
 	}
@@ -64,7 +66,11 @@ func makeFuncCallback(obj reflect.Value) reflect.Value {
 		v.Set(obj)
 		obj = v
 	}
-	impl := *(**makeFuncImpl)(obj.Addr().UnsafePointer())
+	return *(**makeFuncImpl)(obj.Addr().UnsafePointer())
+}
+
+func makeFuncCallback(obj reflect.Value) reflect.Value {
+	impl := makeFuncStorage(obj)
 	return reflect.ValueOf(&impl.fn).Elem()
 }
 
@@ -95,8 +101,10 @@ func (es *encodeState) encodeFunction(obj reflect.Value, dest *object) {
 	}
 	pc := obj.Pointer()
 	if pc == makeFuncPC {
+		impl := makeFuncStorage(obj)
 		f.PC = uintValue(pc)
-		es.resolve(makeFuncCallback(obj).Addr(), &f.Env)
+		f.Type = es.findType(nativeReflectType(impl.ftyp))
+		es.resolve(reflect.ValueOf(&impl.fn), &f.Env)
 		runtime.KeepAlive(obj)
 		return
 	}
@@ -152,6 +160,7 @@ func (ds *decodeState) decodeFunction(obj reflect.Value, f *functionValue) {
 		return
 	}
 	if uintptr(f.PC) == makeFuncPC {
+		signature := ds.findType(f.Type)
 		typ := reflect.TypeFor[func([]reflect.Value) []reflect.Value]()
 		callback := ds.register(&f.Env, typ)
 		if callback.Type() != typ {
@@ -161,16 +170,18 @@ func (ds *decodeState) decodeFunction(obj reflect.Value, f *functionValue) {
 		if !ok {
 			// The callback may refer back to this function. Publish the
 			// wrapper now and install callbacks after the graph is decoded.
-			fn = reflect.MakeFunc(obj.Type(), nil)
+			fn = reflect.MakeFunc(signature, nil)
 			if ds.makeFuncs == nil {
 				ds.makeFuncs = make(map[reflect.Value]reflect.Value)
 			}
 			ds.makeFuncs[callback] = fn
 		}
-		if !fn.Type().ConvertibleTo(obj.Type()) {
-			Failf("MakeFunc reference changes signature from %v to %v", fn.Type(), obj.Type())
+		if fn.Type() != signature {
+			Failf("MakeFunc reference changes internal signature from %v to %v", fn.Type(), signature)
 		}
-		obj.Set(fn.Convert(obj.Type()))
+		// ixgo's linkname handling reinterprets the outer function type without
+		// changing ftyp, e.g. func() *pkg.point viewed as func() *main.point.
+		obj.Set(xtype.ConvertFuncValue(xtype.TypeOfType(obj.Type()), fn))
 		return
 	}
 	if uintptr(f.PC) == methodValuePC {

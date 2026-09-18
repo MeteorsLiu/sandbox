@@ -41,6 +41,8 @@ func objectExamples() []object {
 		&typeDescriptor{Name: "test.Node", Fields: []string{"Value", "Next"}},
 		&functionValue{}, &functionValue{PC: 0x520000, Env: refValue{Root: 2}},
 		&functionValue{PC: 0x520000},
+		&functionValue{PC: 0x520000, Env: refValue{Root: 2}, Type: &reflectedType{ID: 1}},
+		&functionValue{PC: 0x520000, Env: refValue{Root: 2}, Type: &reflectedType{ID: 1, reflectx: true}},
 		&channelValue{}, &channelValue{Capacity: 3, Ref: refValue{Root: 2}},
 		&channelData{}, &channelData{Closed: true, Values: arrayValue{Contents: []object{intValue(10), intValue(20)}}},
 		&reflectedValue{Type: nilType{}, Value: nilValue{}},

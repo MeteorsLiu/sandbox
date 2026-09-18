@@ -118,8 +118,8 @@ func (e *ErrState) Unwrap() error {
 // Bound methods resolve their named receiver from the function symbol and
 // static type links, then save the receiver as the method value's environment.
 // Missing layouts are rejected. Captured objects are saved; globals are not.
-// MakeFunc wrappers are rebuilt from the function type and saved callback;
-// the callback and everything it captures must also be supported by Save.
+// MakeFunc wrappers retain their internal signature separately from the outer
+// function type. The callback and its captures must also be supported by Save.
 // Standard stream references rebind to the local os.Stdin/Stdout/Stderr.
 // Other files, OS processes, timers and cancellation contexts are rejected.
 func Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
