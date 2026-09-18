@@ -70,6 +70,14 @@ func checkKernelLifecycle() error {
 			call.Number = unix.SYS_GETPID
 		},
 	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(executable); strings.HasPrefix(dir, "/tmp/") {
+		// CI keeps the executable under /tmp, which the private tmpfs hides.
+		s.Mounts = append(s.Mounts, sandbox.Mount{Type: "bind", Source: dir, Target: dir, Options: []string{"ro"}})
+	}
 	defer s.Close()
 	results := make(chan error, 2)
 	for id := range 2 {
@@ -157,9 +165,20 @@ func checkKernelLifecycle() error {
 	if err := s.Run(staticCall); err == nil {
 		return fmt.Errorf("Run after Close succeeded")
 	}
-	after, err = countKernels()
-	if err != nil || after != before {
-		return fmt.Errorf("Kernel cleanup: before=%d after=%d error=%v", before, after, err)
+	// MemoryFile.Destroy wakes a background releaser; Close may return first.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		after, err = countKernels()
+		if err != nil {
+			return fmt.Errorf("Kernel cleanup: %w", err)
+		}
+		if after == before {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Kernel cleanup timed out: before=%d after=%d", before, after)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	const waiting = 0xffffffe1
