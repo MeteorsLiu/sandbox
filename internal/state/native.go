@@ -14,6 +14,7 @@ type nativeState struct {
 }
 
 var makeFuncPC = reflect.MakeFunc(reflect.TypeFor[func()](), nil).Pointer()
+var methodValuePC = reflect.ValueOf(reflect.Value{}).MethodByName("IsValid").Pointer()
 
 // Go 1.26.6 reflect.makeFuncImpl on linux/amd64 and linux/arm64. Both
 // architectures use a two-byte abi.IntArgRegBitmap. Only fn is transferred;
@@ -25,6 +26,33 @@ type makeFuncImpl struct {
 	regPtrs [2]byte
 	ftyp    unsafe.Pointer
 	fn      func([]reflect.Value) []reflect.Value
+}
+
+type methodValueEnv struct {
+	method   int
+	receiver reflect.Value
+}
+
+// Go 1.26.6 reflect.methodValue on linux/amd64 and linux/arm64. Only env is
+// transferred; receiver.Method reconstructs the local call layout.
+type methodValueImpl struct {
+	code    uintptr
+	stack   unsafe.Pointer
+	argLen  uintptr
+	regPtrs [2]byte
+	env     methodValueEnv
+}
+
+func methodValueStorage(obj reflect.Value) *methodValueImpl {
+	if _, err := executableNativeMetadata(); err != nil {
+		Failf("method value metadata: %w", err)
+	}
+	if !obj.CanAddr() {
+		v := reflect.New(obj.Type()).Elem()
+		v.Set(obj)
+		obj = v
+	}
+	return *(**methodValueImpl)(obj.Addr().UnsafePointer())
 }
 
 func makeFuncCallback(obj reflect.Value) reflect.Value {
@@ -69,6 +97,12 @@ func (es *encodeState) encodeFunction(obj reflect.Value, dest *object) {
 	if pc == makeFuncPC {
 		f.PC = uintValue(pc)
 		es.resolve(makeFuncCallback(obj).Addr(), &f.Env)
+		runtime.KeepAlive(obj)
+		return
+	}
+	if pc == methodValuePC {
+		f.PC = uintValue(pc)
+		es.resolve(reflect.ValueOf(&methodValueStorage(obj).env), &f.Env)
 		runtime.KeepAlive(obj)
 		return
 	}
@@ -135,6 +169,32 @@ func (ds *decodeState) decodeFunction(obj reflect.Value, f *functionValue) {
 		}
 		if !fn.Type().ConvertibleTo(obj.Type()) {
 			Failf("MakeFunc reference changes signature from %v to %v", fn.Type(), obj.Type())
+		}
+		obj.Set(fn.Convert(obj.Type()))
+		return
+	}
+	if uintptr(f.PC) == methodValuePC {
+		if _, err := executableNativeMetadata(); err != nil {
+			Failf("method value metadata: %w", err)
+		}
+		typ := reflect.TypeFor[methodValueEnv]()
+		env := ds.register(&f.Env, typ)
+		if env.Type() != typ {
+			Failf("method environment has type %v, want %v", env.Type(), typ)
+		}
+		fn, ok := ds.methodValues[env]
+		if !ok {
+			// A receiver may contain this function. Publish its storage before
+			// decoding the receiver and fill the layout before AfterLoad runs.
+			fn = reflect.New(obj.Type()).Elem()
+			*(*unsafe.Pointer)(fn.Addr().UnsafePointer()) = unsafe.Pointer(&methodValueImpl{code: methodValuePC})
+			if ds.methodValues == nil {
+				ds.methodValues = make(map[reflect.Value]reflect.Value)
+			}
+			ds.methodValues[env] = fn
+		}
+		if !fn.Type().ConvertibleTo(obj.Type()) {
+			Failf("method reference changes signature from %v to %v", fn.Type(), obj.Type())
 		}
 		obj.Set(fn.Convert(obj.Type()))
 		return

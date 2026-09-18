@@ -123,5 +123,17 @@ func (ds *decodeState) encoder(ctx context.Context, mem []byte) *encodeState {
 		_, gap := es.values.Find(addr)
 		es.values.Insert(gap, addrRange{addr, addr + actual.Type().Size()}, seg.Value())
 	}
+	// Rebuilt method wrappers keep the decoded environment's object ID, just
+	// like MakeFunc callback slots above.
+	for env, fn := range ds.methodValues {
+		seg, _ := es.values.Find(env.Addr().Pointer())
+		if !seg.Ok() {
+			Failf("method environment object is missing")
+		}
+		actual := reflect.ValueOf(&methodValueStorage(fn).env).Elem()
+		addr := actual.Addr().Pointer()
+		_, gap := es.values.Find(addr)
+		es.values.Insert(gap, addrRange{addr, addr + actual.Type().Size()}, seg.Value())
+	}
 	return es
 }
