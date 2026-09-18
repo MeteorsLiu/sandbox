@@ -125,6 +125,53 @@ func TestNativeFunction(t *testing.T) {
 	}
 }
 
+func TestNativeUnreachableMethod(t *testing.T) {
+	m, err := loadNativeMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sym, ok := m.names["runtime.unreachableMethod"]
+	if !ok {
+		t.Fatal("missing runtime.unreachableMethod symbol")
+	}
+	pc := uintptr(sym.Value)
+	// reflectx.MethodX builds a heap funcval even for linker placeholders.
+	// Its reflected signature can include a receiver, but it has no captures.
+	storage := new(uintptr)
+	*storage = pc
+	var fn func(*nativeMethodReceiver, int) int
+	*(*unsafe.Pointer)(unsafe.Pointer(&fn)) = unsafe.Pointer(storage)
+	mem := make([]byte, 4096)
+	var graph State
+	n, _, err := graph.Save(context.Background(), mem, &fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.saved.pending) != 1 {
+		t.Fatalf("placeholder emitted %d objects, want only the function", len(graph.saved.pending))
+	}
+	record, ok := graph.saved.pending[1].encoded.(*functionValue)
+	if !ok || record.PC != uintValue(pc) || record.Env.Root != 0 {
+		t.Fatalf("placeholder record: %#v", record)
+	}
+	var restored func(*nativeMethodReceiver, int) int
+	if _, err := Load(context.Background(), mem[:n], &restored); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	if restored == nil || reflect.ValueOf(restored).Pointer() != pc {
+		t.Fatal("placeholder was dropped or its PC changed")
+	}
+	// Classification must not require scanning any factory instructions.
+	m.path = filepath.Join(t.TempDir(), "missing-executable")
+	if layout, err := m.layout(pc, false); err != nil || layout != reflect.TypeFor[struct{ F uintptr }]() {
+		t.Fatalf("placeholder layout: %v, %v", layout, err)
+	}
+	if len(m.scanned) != 0 {
+		t.Fatalf("placeholder lookup scanned %d factories", len(m.scanned))
+	}
+}
+
 func TestNativeCaptureFreeLayout(t *testing.T) {
 	m, err := loadNativeMetadata()
 	if err != nil {
