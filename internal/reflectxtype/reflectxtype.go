@@ -73,11 +73,6 @@ func export(previous *ReflectType) (*Snapshot, error) {
 	}
 	transferMu.Lock()
 	defer transferMu.Unlock()
-	methodTracePhase = "export-host"
-	if previous != nil {
-		methodTracePhase = "export-retained"
-	}
-	traceMethods("begin previous=%p", previous)
 
 	roots := cachedTypes()
 	// The leading three fields match reflectx v1.7.8 Context. Retain typed
@@ -140,9 +135,6 @@ func export(previous *ReflectType) (*Snapshot, error) {
 	for _, typ := range ctx.interfaces {
 		roots = append(roots, typ)
 		e.needed[typ] = true
-	}
-	if previous != nil {
-		methodTracePhase = "export-return-roots"
 	}
 	for _, typ := range roots {
 		if e.requiresReflectx(typ) {
@@ -233,9 +225,6 @@ func (e *exporter) encode(typ reflect.Type) ([]byte, error) {
 	var hasInterface []bool
 	var entries []methodEntries
 	if kind != reflect.Interface && (kind != reflect.Pointer || typ.Name() != "") {
-		if methodTraceEnabled {
-			traceMethods("encode typeID=%d type=%q addr=%p retained=%t", e.ids[typ], typ.String(), (*[2]unsafe.Pointer)(unsafe.Pointer(&typ))[1], len(e.retainedMethods[typ]) != 0)
-		}
 		methods, functions, hasInterface, entries = concreteMethodSet(typ)
 	}
 	retained := e.retainedMethods[typ]

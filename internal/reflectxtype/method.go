@@ -53,7 +53,6 @@ func concreteMethodSet(typ reflect.Type) ([]reflectx.Method, []reflect.Value, []
 		pointer := receiver != typ
 		rt := (*[2]unsafe.Pointer)(unsafe.Pointer(&receiver))[1]
 		raw := runtimeMethods(rt)
-		traceMethodTable("scan", receiver, raw)
 		for i := 0; i < reflectx.NumMethodX(receiver); i++ {
 			signature := raw[i].signature
 			if signature == 0 || signature == -1 {
@@ -125,8 +124,6 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 	}
 	transferMu.Lock()
 	defer transferMu.Unlock()
-	methodTracePhase = "install"
-	traceMethods("table=%p retained=%d types=%d callbacks=%d", t, t.retained, len(t.types), len(callbacks))
 	defer t.ctx.SetHasImethod(nil)
 	defer func() {
 		if failure := recover(); failure != nil {
@@ -142,7 +139,6 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 		for _, method := range def.methods {
 			ids[methodIdentity{method.name, method.pkg, method.pointer}] = method.function
 		}
-		traceMethods("install typeID=%d type=%q addr=%p ids=%v", i+1, t.types[i].String(), (*[2]unsafe.Pointer)(unsafe.Pointer(&t.types[i]))[1], ids)
 		if i < t.retained {
 			methods, _, _, entries := concreteMethodSet(t.types[i])
 			for j, method := range methods {
@@ -191,8 +187,6 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 			}
 			installed[id] = entry
 		}
-		traceMethodTable("installed", typ, values)
-		traceMethodTable("installed", ptyp, pointers)
 	}
 	return nil
 }
