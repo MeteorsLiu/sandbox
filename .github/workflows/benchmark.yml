@@ -1,0 +1,100 @@
+name: Formula benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/benchmark-accounting]
+    paths:
+      - 'benchmarks/**'
+      - 'testdata/llar/benchmark/**'
+      - '.github/workflows/benchmark.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check native Linux and KVM
+        run: |
+          uname -a
+          lscpu
+          test -c /dev/kvm
+          ls -l /dev/kvm
+          docker info
+      - name: Build common payload and toolchain image
+        id: build
+        run: docker build --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" -f benchmarks/Dockerfile -t sandbox-formula-bench:ci .
+      - name: Prepare Firecracker wrapper and identical root filesystem
+        id: firecracker
+        run: sudo bash benchmarks/setup-firecracker.sh sandbox-formula-bench:ci /tmp/firecracker-benchmark
+      - name: Measure three independent cold starts per backend
+        if: ${{ !cancelled() && steps.firecracker.outcome == 'success' }}
+        run: |
+          mkdir -p results/cold
+          git rev-parse HEAD > results/source-revision.txt
+          for trial in 1 2 3; do
+            case "$trial" in
+              1) order=firecracker,docker,sandbox ;;
+              2) order=docker,sandbox,firecracker ;;
+              3) order=sandbox,firecracker,docker ;;
+            esac
+            mkdir -p "results/cold/trial-$trial"
+            sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/cold/trial-$trial" --backends "$order" --firecracker-assets /tmp/firecracker-benchmark --concurrency 1 --builds 1 | tee "results/cold/trial-$trial/summary.jsonl"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formula-benchmark-cold-amd64
+          path: results/cold/
+      - name: Run Firecracker Formula benchmarks
+        if: ${{ !cancelled() && steps.firecracker.outcome == 'success' }}
+        run: |
+          mkdir -p results/firecracker
+          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/firecracker" --backends firecracker --firecracker-assets /tmp/firecracker-benchmark --concurrency 1,2,4,8 --builds 8 | tee results/firecracker/summary.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formula-benchmark-firecracker-amd64
+          path: results/firecracker/
+      - name: Run Docker Formula benchmarks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          mkdir -p results/docker
+          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/docker" --backends docker --concurrency 1,2,4,8 --builds 8 | tee results/docker/summary.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formula-benchmark-docker-amd64
+          path: results/docker/
+      - name: Run sandbox Formula benchmarks
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          mkdir -p results/sandbox
+          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/sandbox" --backends sandbox --concurrency 1,2,4,8 --builds 8 | tee results/sandbox/summary.jsonl
+      - name: Save exact guest kernel and VMM identities
+        if: always()
+        run: |
+          mkdir -p results
+          if test -f /tmp/firecracker-benchmark/kernel.json; then cp /tmp/firecracker-benchmark/kernel.json results/; fi
+          if test -f /tmp/firecracker-benchmark/checksums.txt; then cp /tmp/firecracker-benchmark/checksums.txt results/; fi
+          docker run --rm --entrypoint cat sandbox-formula-bench:ci /opt/benchmark/toolchain.txt > results/toolchain.txt
+          docker run --rm --entrypoint cat sandbox-formula-bench:ci /opt/benchmark/binaries.sha256 > results/binaries.sha256
+          docker run --rm --entrypoint cat sandbox-formula-bench:ci /opt/benchmark/input/manifest.json > results/input-manifest.json
+          for trial in 1 2 3; do
+            if test -f "results/cold/trial-$trial/environment.json"; then python3 benchmarks/report.py "results/cold/trial-$trial" >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+          for backend in firecracker docker sandbox; do
+            if test -f "results/$backend/environment.json"; then python3 benchmarks/report.py "results/$backend" >> "$GITHUB_STEP_SUMMARY"; fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formula-benchmark-amd64
+          path: results/
