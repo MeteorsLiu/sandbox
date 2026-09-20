@@ -87,6 +87,7 @@ def main():
         host = {"ReadonlyRootfs": True, "NetworkMode": "none", "CapDrop": ["ALL"],
                 "SecurityOpt": ["seccomp=unconfined"], "CpusetCpus": args.cpuset,
                 "Memory": args.memory_mib * 1024 * 1024,
+                "MemorySwap": args.memory_mib * 1024 * 1024,
                 "Tmpfs": {"/work": "rw,exec,nosuid,nodev,mode=1777,size=256m",
                           "/tmp": "rw,exec,nosuid,nodev,mode=1777,size=256m"}}
         config = {"Image": args.image, "HostConfig": host,
@@ -116,6 +117,7 @@ def main():
             active.add(cid)
         t0 = time.perf_counter_ns()
         record["start_ns"] = t0
+        print(json.dumps({"event": "task_start", "backend": backend, "concurrency": concurrency, "task": task_id}), flush=True)
         with (output / f"{name}.log").open("w") as log:
             proc = subprocess.Popen(["docker", "start", "-a", cid], stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True)
@@ -131,10 +133,13 @@ def main():
                         event["memory_bytes"] = stats.get("memory_stats", {}).get("usage", 0)
                         event["memory_sample_lag_ns"] = time.perf_counter_ns()-now
                     record["events"].append(event)
+                    if event["event"] in ("main", "ready", "result", "guest_exit"):
+                        print(json.dumps({"backend": backend, "task": task_id, **event}), flush=True)
             proc.wait()
         record["wall_ns"] = time.perf_counter_ns()-t0
         record["state"] = api("GET", f"/containers/{cid}/json")["State"]
         record["exit_code"] = record["state"]["ExitCode"]
+        print(json.dumps({"event": "task_exit", "backend": backend, "task": task_id, "exit_code": record["exit_code"]}), flush=True)
         expected = "guest_entry" if backend == "sandbox" else "main"
         entries = [e["observed_ns"] for e in record["events"] if e["event"] == expected]
         record["launch_to_entry_ns"] = entries[0] if entries else None

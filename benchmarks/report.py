@@ -2,7 +2,6 @@
 """Summarize retained samples without hiding unsuccessful builds."""
 import csv
 import json
-import math
 import pathlib
 import sys
 
@@ -19,8 +18,8 @@ for path in sorted(root.glob("*-c*.json")):
     rows.append({"backend": data["backend"], "concurrency": data["concurrency"],
                  "success": f"{data['successful']}/{data['count']}",
                  "builds_per_second": round(data["builds_per_second"], 4),
-                 "build_p50_ms": round(data["build_latency"].get("p50_ns", 0)/1e6, 3),
-                 "build_p95_ms": round(data["build_latency"].get("p95_ns", 0)/1e6, 3),
+                 "build_p50_ms": round(data["build_latency"]["p50_ns"]/1e6, 3) if data["build_latency"] else "N/A",
+                 "build_p95_ms": round(data["build_latency"]["p95_ns"]/1e6, 3) if data["build_latency"] else "N/A",
                  "peak_memory_mib": round(data["memory_peak_bytes"]/1048576, 2),
                  "launch_to_entry_p50_ms": median(starts), "run_to_entry_p50_ms": median(entries),
                  "oom_killed": data.get("oom_killed", "unrecorded")})

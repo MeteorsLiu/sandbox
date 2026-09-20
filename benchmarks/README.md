@@ -17,7 +17,7 @@ sudo python3 benchmarks/run.py --image sandbox-formula-bench:local \
   --output /tmp/formula-results --firecracker-assets /tmp/firecracker-assets
 ```
 
-The `Formula benchmark` workflow provisions this environment on `ubuntu-latest`. Firecracker v1.17.0 boots a read-only ext4 export of the exact Docker payload image; it mounts private writable work/tmp directories and runs the same executable as UID/GID 1000. Kernel URL and SHA-256 are retained. No network or build cache is available during execution. Every backend uses the selected CPU affinity, container memory ceiling, toolchain and `MAKEFLAGS=-j1`. Firecracker guest RAM is configured to that same ceiling; its actual consumption is measured, not inferred from the configuration.
+The `Formula benchmark` workflow provisions this environment on `ubuntu-latest`. Firecracker v1.17.0 boots a read-only ext4 export of the exact Docker payload image; it mounts private writable work/tmp directories and runs the same executable as UID/GID 1000. Kernel URL and SHA-256 are retained. No network, swap or build cache is available during execution. Every backend uses the selected CPU affinity, container memory ceiling, toolchain and `MAKEFLAGS=-j1`. Firecracker guest RAM is configured to that same ceiling; its actual consumption is measured, not inferred from the configuration.
 
 ## Measurements
 
