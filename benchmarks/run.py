@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--backends", default="sandbox,docker,firecracker")
     parser.add_argument("--concurrency", default="1,2,4,8")
-    parser.add_argument("--waves", type=int, default=2)
+    parser.add_argument("--builds", type=int, default=8, help="same total build count at every concurrency")
     parser.add_argument("--cpuset", default="0,1")
     parser.add_argument("--memory-mib", type=int, default=4096)
     parser.add_argument("--firecracker-assets")
@@ -122,13 +122,19 @@ def main():
             for line in proc.stdout:
                 now = time.perf_counter_ns()
                 log.write(line)
+                log.flush()
                 if "BENCH:" in line:
                     event = json.loads(line.split("BENCH:", 1)[1])
                     event["observed_ns"] = now-t0
+                    if event["event"] in ("main", "ready", "guest_entry"):
+                        stats = api("GET", f"/containers/{cid}/stats?stream=false&one-shot=true")
+                        event["memory_bytes"] = stats.get("memory_stats", {}).get("usage", 0)
+                        event["memory_sample_lag_ns"] = time.perf_counter_ns()-now
                     record["events"].append(event)
             proc.wait()
         record["wall_ns"] = time.perf_counter_ns()-t0
-        record["exit_code"] = api("GET", f"/containers/{cid}/json")["State"]["ExitCode"]
+        record["state"] = api("GET", f"/containers/{cid}/json")["State"]
+        record["exit_code"] = record["state"]["ExitCode"]
         expected = "guest_entry" if backend == "sandbox" else "main"
         entries = [e["observed_ns"] for e in record["events"] if e["event"] == expected]
         record["launch_to_entry_ns"] = entries[0] if entries else None
@@ -145,7 +151,9 @@ def main():
         for concurrency in map(int, args.concurrency.split(",")):
             if backend == "firecracker" and not args.firecracker_assets:
                 raise ValueError("Firecracker needs --firecracker-assets; run setup-firecracker.sh first")
-            count = concurrency * args.waves
+            count = args.builds
+            if concurrency > count:
+                raise ValueError("--builds must be at least every requested concurrency")
             samples.clear()
             finished.clear()
             sampler_errors = []
@@ -169,7 +177,8 @@ def main():
                 finished.set()
                 observer.join()
             wall = time.perf_counter_ns()-t0
-            success = sum(r["count"] for r in records if r["success"])
+            success = sum(1 for r in records for e in r["events"]
+                          if e["event"] == "result" and not e.get("error"))
             durations = sorted(e["duration_ns"] for r in records for e in r["events"]
                                if e["event"] == "result" and not e.get("error"))
             percentiles = {f"p{p}_ns": durations[min(len(durations)-1, math.ceil(len(durations)*p/100)-1)]
@@ -178,12 +187,13 @@ def main():
                        "successful": success, "wall_ns": wall, "builds_per_second": success/(wall/1e9),
                        "memory_peak_bytes": max((s["memory_bytes"] for s in samples), default=0),
                        "build_latency": percentiles,
+                       "oom_killed": sum(r["state"].get("OOMKilled", False) for r in records),
                        "sampler_errors": sampler_errors, "records": records, "samples": list(samples)}
             (output / f"{backend}-c{concurrency}.json").write_text(json.dumps(summary, indent=2)+"\n")
             print(json.dumps({k: v for k, v in summary.items() if k not in ("records", "samples")}), flush=True)
             for record in records:
                 api("DELETE", f"/containers/{record['container']}")
-            failures += count-success+bool(sampler_errors)
+            failures += count-success+bool(sampler_errors)+sum(r["exit_code"] != 0 for r in records)
     if failures:
         raise SystemExit(f"{failures} failed builds/measurements; see raw results")
 

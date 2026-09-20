@@ -73,6 +73,18 @@ func run(started time.Time) error {
 		return err
 	}
 	jobs := make([]job, *count)
+	formulaFS := os.DirFS(filepath.Join(*input, "formula")).(fs.ReadFileFS)
+	builds := make([]func(*formulapkg.Context), min(*concurrency, *count))
+	for i := range builds {
+		loaded, err := formula.LoadFS(formulaFS, "v1.3.1/zlib_llar.gox")
+		if err != nil {
+			return fmt.Errorf("load Formula: %w", err)
+		}
+		if loaded.ModPath != "madler/zlib" || loaded.OnBuild == nil {
+			return fmt.Errorf("unexpected Formula %q", loaded.ModPath)
+		}
+		builds[i] = loaded.OnBuild
+	}
 	for i := range jobs {
 		dir := filepath.Join(*work, fmt.Sprintf("job-%d", i))
 		source, out := filepath.Join(dir, "source"), filepath.Join(dir, "install")
@@ -82,18 +94,9 @@ func run(started time.Time) error {
 		if err := os.MkdirAll(out, 0755); err != nil {
 			return err
 		}
-		formulaFS := os.DirFS(filepath.Join(*input, "formula")).(fs.ReadFileFS)
-		loaded, err := formula.LoadFS(formulaFS, "v1.3.1/zlib_llar.gox")
-		if err != nil {
-			return fmt.Errorf("load Formula: %w", err)
-		}
-		if loaded.ModPath != "madler/zlib" || loaded.OnBuild == nil {
-			return fmt.Errorf("unexpected Formula %q", loaded.ModPath)
-		}
 		jobs[i] = job{
-			build: loaded.OnBuild,
-			ctx:   formulapkg.NewContext(&formulapkg.Project{SourceFS: formulaFS}, source, out, "linux/"+runtime.GOARCH, nil),
-			out:   out,
+			ctx: formulapkg.NewContext(&formulapkg.Project{SourceFS: formulaFS}, source, out, "linux/"+runtime.GOARCH, nil),
+			out: out,
 		}
 	}
 	// Each interpreter is prepared before concurrent transfers: constructing
@@ -125,14 +128,16 @@ func run(started time.Time) error {
 	results := make(chan result, *count)
 	var workers sync.WaitGroup
 	begin := time.Now()
-	for range min(*concurrency, *count) {
+	for worker := range builds {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for id := range queue {
 				t0 := time.Now()
 				r := result{Event: "result", ID: id}
-				err := execute(jobs[id], *backend, &s)
+				j := jobs[id]
+				j.build = builds[worker]
+				err := execute(j, *backend, &s)
 				r.DurationNS = time.Since(t0).Nanoseconds()
 				select {
 				case entry := <-entries:

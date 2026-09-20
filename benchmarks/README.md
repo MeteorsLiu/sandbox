@@ -6,7 +6,7 @@ The payload is the unmodified `madler/zlib/v1.3.1/zlib_llar.gox` from xgo-dev/ll
 docker build -f benchmarks/Dockerfile -t sandbox-formula-bench:local .
 python3 benchmarks/run.py --image sandbox-formula-bench:local \
   --output /tmp/formula-results --backends sandbox,docker \
-  --concurrency 1,2,4,8 --waves 3
+  --concurrency 1,2,4,8 --builds 8
 ```
 
 For all three backends, use a native Linux x86_64 machine with Docker, Python 3, e2fsprogs and readable/writable `/dev/kvm`:
@@ -25,6 +25,6 @@ The `Formula benchmark` workflow provisions this environment on `ubuntu-latest`.
 - Serial sandbox samples additionally report `entry_ns`: `Sandbox.Run` to guest entry, after Go initialization but before `state.Load`. The benchmark-only Go overlay adds a tagged `getpid` syscall there. Library sources and production behavior are unchanged. Parallel runs disable this inspector and do not guess which Run an entry belongs to.
 - `duration_ns` times `OnBuild` plus validation; sandbox includes state export, guest execution and writeback. The batch throughput includes Formula preparation and container startup/cleanup. Raw events distinguish these phases.
 - The controller samples raw Docker API `memory_stats.usage` every 100 ms and sums active containers. This includes page cache, the sandbox host/Sentry/workers, or the Firecracker VMM and resident guest memory. The common Docker daemon is excluded. Shared-page charge ownership follows cgroup accounting, not summed process RSS; peaks shorter than the sampling interval can be missed.
-- Concurrency uses independent Formula instances and contexts. The sandbox case shares one Kernel; Docker and Firecracker create one execution environment per build. Interpreter construction finishes before concurrent sandbox transfers, as required by the current type-cache contract. Failures remain failures and are excluded from successful latency percentiles.
+- Every concurrency level completes the same requested number of builds. Each sandbox worker owns one interpreter, reused sequentially with fresh build contexts and directories; workers share one Kernel. Docker and Firecracker create one execution environment per build. Interpreter construction finishes before concurrent sandbox transfers, as required by the current type-cache contract. Failures remain failures and are excluded from successful latency percentiles.
 
 Each run writes environment metadata, container logs, per-task JSON, raw memory samples and batch summaries. Do not compare local Docker Desktop ARM64 results with native amd64 runner results as if they came from the same machine.

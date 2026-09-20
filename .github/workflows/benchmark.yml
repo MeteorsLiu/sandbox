@@ -32,13 +32,14 @@ jobs:
       - name: Run Formula benchmarks
         run: |
           mkdir -p results
-          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results" --firecracker-assets /tmp/firecracker-benchmark --concurrency 1,2,4,8 --waves 3 | tee results/summary.jsonl
+          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results" --firecracker-assets /tmp/firecracker-benchmark --concurrency 1,2,4,8 --builds 8 | tee results/summary.jsonl
       - name: Save exact guest kernel and VMM identities
         if: always()
         run: |
           mkdir -p results
           if test -f /tmp/firecracker-benchmark/kernel.json; then cp /tmp/firecracker-benchmark/kernel.json results/; fi
           if test -f /tmp/firecracker-benchmark/checksums.txt; then cp /tmp/firecracker-benchmark/checksums.txt results/; fi
+          if test -f results/environment.json; then python3 benchmarks/report.py results >> "$GITHUB_STEP_SUMMARY"; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
