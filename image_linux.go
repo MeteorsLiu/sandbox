@@ -19,9 +19,9 @@ func newStateImage() (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	// The result may grow, but neither participant may truncate a live mapping
-	// or change the seals after the descriptor is handed to the guest.
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
+	// The guest may append its result, but cannot truncate a live mapping.
+	// The host adds the final write and seal locks before reading that result.
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SHRINK); err != nil {
 		unix.Close(fd)
 		return -1, err
 	}
@@ -87,37 +87,34 @@ func (w *imageWriter) Write(p []byte) (int, error) {
 	}
 }
 
-// The sender must have finished before reading. Copy before decoding, and keep
-// no references to the shared mapping while restoring the host object graph.
-func readStateImage(fd int, offset int64) ([]byte, error) {
+// The sender must have finished before reading. The host also seals returned
+// images against writes. The caller must keep the mapping until its state
+// round trip is complete, then release it using the returned function.
+func readStateImage(fd int, offset int64) ([]byte, func() error, error) {
 	var header [8]byte
 	n, err := unix.Pread(fd, header[:], offset)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if n != len(header) {
-		return nil, io.ErrUnexpectedEOF
+		return nil, nil, io.ErrUnexpectedEOF
 	}
 	size := binary.LittleEndian.Uint64(header[:])
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if offset < 0 || offset > stat.Size || size < 8 || size > uint64(stat.Size-offset) {
-		return nil, fmt.Errorf("invalid or incomplete sandbox image length %d", size)
+		return nil, nil, fmt.Errorf("invalid or incomplete sandbox image length %d", size)
 	}
 	mapOffset := offset - offset%int64(unix.Getpagesize())
 	delta := int(offset - mapOffset)
 	if size > uint64(math.MaxInt-delta) {
-		return nil, fmt.Errorf("sandbox mapping size overflow")
+		return nil, nil, fmt.Errorf("sandbox mapping size overflow")
 	}
 	mem, err := unix.Mmap(fd, mapOffset, delta+int(size), unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	data := append([]byte(nil), mem[delta+8:delta+int(size)]...)
-	if err := unix.Munmap(mem); err != nil {
-		return nil, err
-	}
-	return data, nil
+	return mem[delta+8 : delta+int(size)], func() error { return unix.Munmap(mem) }, nil
 }

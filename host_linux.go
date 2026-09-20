@@ -12,6 +12,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -85,7 +86,7 @@ func sandboxInspect(owner C.uintptr_t, event *C.struct_syscall_event) {
 // Captures must be exclusively owned for the duration of Run. Calls may overlap
 // when their captured graphs are independent. Configuration must not change
 // until all active calls return.
-func (s *Sandbox) Run(fn func()) error {
+func (s *Sandbox) Run(fn func()) (err error) {
 	if fn == nil {
 		return fmt.Errorf("sandbox: nil function")
 	}
@@ -153,10 +154,16 @@ func (s *Sandbox) Run(fn func()) error {
 	if inspectionErr != nil {
 		return inspectionErr
 	}
-	data, err := readStateImage(fd, resultOffset)
+	// Seal before either decode pass, including against any fd the guest
+	// transferred elsewhere. Existing writable mappings make this fail.
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_SEAL); err != nil {
+		return fmt.Errorf("sandbox result seal: %w", err)
+	}
+	data, unmap, err := readStateImage(fd, resultOffset)
 	if err != nil {
 		return fmt.Errorf("sandbox result: %w", err)
 	}
+	defer func() { err = errors.Join(err, unmap()) }()
 	if _, err := graph.Load(ctx, data, &fn); err != nil {
 		return fmt.Errorf("sandbox import: %w", err)
 	}
