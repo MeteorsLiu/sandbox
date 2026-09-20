@@ -3,9 +3,9 @@
 package sandbox
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -19,9 +19,9 @@ func newStateImage() (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	// The result may grow, but neither participant may truncate a live mapping
-	// or change the seals after the descriptor is handed to the guest.
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
+	// The guest may append its result, but cannot truncate a live mapping.
+	// The host adds the final write and seal locks before reading that result.
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SHRINK); err != nil {
 		unix.Close(fd)
 		return -1, err
 	}
@@ -32,90 +32,89 @@ func newStateImage() (int, error) {
 // The input and result occupy consecutive images in the same memfd. The host
 // retains the result offset independently of the guest-writable input header.
 func writeStateImage(fd int, offset int64, graph *state.State, root any) (int64, error) {
-	data := make([]byte, 1<<20)
-	var n int
-	for {
-		var err error
-		n, _, err = graph.Save(context.Background(), data, root)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, io.ErrShortBuffer) {
-			return 0, err
-		}
-		if len(data) > (math.MaxInt-16)/2 {
-			return 0, fmt.Errorf("sandbox image exceeds addressable memory")
-		}
-		data = make([]byte, 2*len(data))
-	}
-	// Reserve the following header as well. A guest that exits without writing
-	// its result leaves this zero, so the host cannot accept the input as output.
-	if offset < 0 || n > math.MaxInt-16 || offset > math.MaxInt64-int64(n)-16 {
+	if offset < 0 || offset > math.MaxInt64-16 {
 		return 0, fmt.Errorf("sandbox image size overflow")
 	}
-	size := int64(n) + 8
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	output := imageWriter{fd: fd, offset: offset}
+	var header [8]byte
+	if _, err := output.Write(header[:]); err != nil {
 		return 0, err
 	}
-	if end := offset + size + 8; end > stat.Size {
-		if err := unix.Ftruncate(fd, end); err != nil {
-			return 0, err
-		}
-	}
-	mapOffset := offset - offset%int64(unix.Getpagesize())
-	delta := int(offset - mapOffset)
-	if n > math.MaxInt-delta-16 {
-		return 0, fmt.Errorf("sandbox mapping size overflow")
-	}
-	mem, err := unix.Mmap(fd, mapOffset, delta+n+16, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	buffer := bufio.NewWriter(&output)
+	n, _, err := graph.SaveTo(context.Background(), buffer, root)
 	if err != nil {
 		return 0, err
 	}
-	image := mem[delta:]
-	binary.LittleEndian.PutUint64(image, 0)
-	copy(image[8:], data[:n])
-	binary.LittleEndian.PutUint64(image[8+n:], 0)
+	if err := buffer.Flush(); err != nil {
+		return 0, err
+	}
+	// An unwritten result must keep its following header unpublished.
+	if _, err := output.Write(header[:]); err != nil {
+		return 0, err
+	}
+	size := int64(n) + 8
 	// Publish the size only after the payload is complete. The reader must also
 	// wait for ownership to transfer; this header is not a synchronization lock.
-	binary.LittleEndian.PutUint64(image, uint64(size))
-	if err := unix.Munmap(mem); err != nil {
+	binary.LittleEndian.PutUint64(header[:], uint64(size))
+	output.offset = offset
+	if _, err := output.Write(header[:]); err != nil {
 		return 0, err
 	}
 	return size, nil
 }
 
-// The sender must have finished before reading. Copy before decoding, and keep
-// no references to the shared mapping while restoring the host object graph.
-func readStateImage(fd int, offset int64) ([]byte, error) {
+// imageWriter keeps the input and result independent of the shared fd offset.
+type imageWriter struct {
+	fd     int
+	offset int64
+}
+
+func (w *imageWriter) Write(p []byte) (int, error) {
+	if w.offset < 0 || w.offset > math.MaxInt64-int64(len(p)) {
+		return 0, fmt.Errorf("sandbox image size overflow")
+	}
+	for {
+		n, err := unix.Pwrite(w.fd, p, w.offset)
+		if err == unix.EINTR {
+			continue
+		}
+		n = max(n, 0)
+		w.offset += int64(n)
+		if err == nil && n != len(p) {
+			err = io.ErrShortWrite
+		}
+		return n, err
+	}
+}
+
+// The sender must have finished before reading. The host also seals returned
+// images against writes. The caller must keep the mapping until its state
+// round trip is complete, then release it using the returned function.
+func readStateImage(fd int, offset int64) ([]byte, func() error, error) {
 	var header [8]byte
 	n, err := unix.Pread(fd, header[:], offset)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if n != len(header) {
-		return nil, io.ErrUnexpectedEOF
+		return nil, nil, io.ErrUnexpectedEOF
 	}
 	size := binary.LittleEndian.Uint64(header[:])
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if offset < 0 || offset > stat.Size || size < 8 || size > uint64(stat.Size-offset) {
-		return nil, fmt.Errorf("invalid or incomplete sandbox image length %d", size)
+		return nil, nil, fmt.Errorf("invalid or incomplete sandbox image length %d", size)
 	}
 	mapOffset := offset - offset%int64(unix.Getpagesize())
 	delta := int(offset - mapOffset)
 	if size > uint64(math.MaxInt-delta) {
-		return nil, fmt.Errorf("sandbox mapping size overflow")
+		return nil, nil, fmt.Errorf("sandbox mapping size overflow")
 	}
 	mem, err := unix.Mmap(fd, mapOffset, delta+int(size), unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	data := append([]byte(nil), mem[delta+8:delta+int(size)]...)
-	if err := unix.Munmap(mem); err != nil {
-		return nil, err
-	}
-	return data, nil
+	return mem[delta+8 : delta+int(size)], func() error { return unix.Munmap(mem) }, nil
 }

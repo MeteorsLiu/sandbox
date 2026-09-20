@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"io"
 	"reflect"
 )
 
@@ -16,11 +17,22 @@ type State struct {
 
 // Save writes the graph, preserving IDs from the preceding Load when present.
 func (s *State) Save(ctx context.Context, mem []byte, rootPtr any) (int, Stats, error) {
+	return s.save(ctx, mem, nil, rootPtr)
+}
+
+// SaveTo writes the same graph records as Save to an output stream.
+// The caller owns flushing and closing the stream.
+func (s *State) SaveTo(ctx context.Context, out io.Writer, rootPtr any) (int, Stats, error) {
+	return s.save(ctx, nil, out, rootPtr)
+}
+
+func (s *State) save(ctx context.Context, mem []byte, out io.Writer, rootPtr any) (int, Stats, error) {
 	es := newEncodeState(ctx, mem)
 	err := safely(func() {
 		if s.loaded != nil {
 			es = s.loaded.encoder(ctx, mem)
 		}
+		es.w.out = out
 		es.Save(reflect.ValueOf(rootPtr).Elem())
 	})
 	if err == nil {

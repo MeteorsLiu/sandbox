@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -30,10 +31,11 @@ func runGuest() (err error) {
 		}
 	}()
 	defer unix.Close(3)
-	data, err := readStateImage(3, 0)
+	data, unmap, err := readStateImage(3, 0)
 	if err != nil {
 		return err
 	}
+	defer func() { err = errors.Join(err, unmap()) }()
 	var graph state.State
 	var fn func()
 	ctx := context.Background()

@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -37,13 +38,20 @@ func TestStateImageRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := readStateImage(fd, offset); err == nil {
+			if _, _, err := readStateImage(fd, offset); err == nil {
 				t.Fatal("unpublished output accepted")
 			}
-			data, err := readStateImage(fd, 0)
+			data, unmapInput, err := readStateImage(fd, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() {
+				if unmapInput != nil {
+					if err := unmapInput(); err != nil {
+						t.Error(err)
+					}
+				}
+			})
 			if int64(len(data))+8 != offset {
 				t.Fatalf("input header: payload=%d offset=%d", len(data), offset)
 			}
@@ -59,10 +67,23 @@ func TestStateImageRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := readStateImage(fd, offset)
+			// Guest mappings are released before the host seals the result.
+			if err := unmapInput(); err != nil {
+				t.Fatal(err)
+			}
+			unmapInput = nil
+			// A changed input header must not redirect the host's result read.
+			if _, err := unix.Pwrite(fd, make([]byte, 8), 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_SEAL); err != nil {
+				t.Fatal(err)
+			}
+			result, unmapResult, err := readStateImage(fd, offset)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer unmapResult()
 			if int64(len(result))+8 != resultSize {
 				t.Fatal("result header does not describe its actual size")
 			}
@@ -73,17 +94,17 @@ func TestStateImageRoundTrip(t *testing.T) {
 			if stat.Size != offset+resultSize+8 {
 				t.Fatalf("memfd size=%d, want %d", stat.Size, offset+resultSize+8)
 			}
-			// A changed input header must not redirect the host's result read.
-			if _, err := unix.Pwrite(fd, make([]byte, 8), 0); err != nil {
-				t.Fatal(err)
-			}
 			if _, err := host.Load(context.Background(), result, &input); err != nil {
 				t.Fatal(err)
 			}
 			if input != output {
 				t.Fatal("result was not written back")
 			}
-			if _, err := readStateImage(fd, offset); err != nil {
+			_, unmapAgain, err := readStateImage(fd, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := unmapAgain(); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -96,7 +117,7 @@ func TestStateImageLengths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unix.Close(fd)
-	if _, err := readStateImage(fd, 0); !errors.Is(err, io.ErrUnexpectedEOF) {
+	if _, _, err := readStateImage(fd, 0); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("empty file: %v", err)
 	}
 	if err := unix.Ftruncate(fd, 32); err != nil {
@@ -108,7 +129,7 @@ func TestStateImageLengths(t *testing.T) {
 		if _, err := unix.Pwrite(fd, header[:], 0); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readStateImage(fd, 0); err == nil {
+		if _, _, err := readStateImage(fd, 0); err == nil {
 			t.Fatalf("accepted invalid length %d", size)
 		}
 	}
@@ -117,5 +138,73 @@ func TestStateImageLengths(t *testing.T) {
 	}
 	if err := unix.Ftruncate(fd, 64); err != nil {
 		t.Fatalf("image could not grow: %v", err)
+	}
+}
+
+func TestStateImageReadMapping(t *testing.T) {
+	fd, err := newStateImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	var graph state.State
+	value := "before"
+	if _, err := writeStateImage(fd, 0, &graph, &value); err != nil {
+		t.Fatal(err)
+	}
+	data, unmap, err := readStateImage(fd, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unmap()
+	index := bytes.Index(data, []byte(value))
+	if index < 0 {
+		t.Fatal("string missing from image")
+	}
+	// An unsealed input view must refer to the file, not a heap copy.
+	if _, err := unix.Pwrite(fd, []byte("after!"), int64(8+index)); err != nil {
+		t.Fatal(err)
+	}
+	if string(data[index:index+len(value)]) != "after!" {
+		t.Fatal("read image does not share the mapped file")
+	}
+}
+
+func TestStateImageWriteSeal(t *testing.T) {
+	fd, err := newStateImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Ftruncate(fd, int64(unix.Getpagesize())); err != nil {
+		t.Fatal(err)
+	}
+	alias, err := unix.Dup(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(alias)
+	writable, err := unix.Mmap(alias, 0, unix.Getpagesize(), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sealErr := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_SEAL)
+	if err := unix.Munmap(writable); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(sealErr, unix.EBUSY) {
+		t.Fatalf("writable mapping was not rejected: %v", sealErr)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_SEAL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Pwrite(alias, []byte{1}, 0); !errors.Is(err, unix.EPERM) {
+		t.Fatalf("write through duplicate fd: %v", err)
+	}
+	if mem, err := unix.Mmap(alias, 0, unix.Getpagesize(), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED); !errors.Is(err, unix.EPERM) {
+		if err == nil {
+			unix.Munmap(mem)
+		}
+		t.Fatalf("new writable mapping: %v", err)
 	}
 }
