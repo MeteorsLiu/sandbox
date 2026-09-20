@@ -22,6 +22,9 @@ func guestEntry() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	// runGuest has released its state graph and input mapping. Collect after
+	// those roots leave the stack, before the guest process exits.
+	runtime.GC()
 }
 
 func runGuest() (err error) {
