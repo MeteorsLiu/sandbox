@@ -16,6 +16,9 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Check native Linux and KVM

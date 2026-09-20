@@ -19,6 +19,7 @@ replacement.write_text(text.replace(entry, entry + "\tunix.RawSyscall(unix.SYS_G
 PY
 go -C "$repo/testdata/llar" build -mod=readonly -overlay="$output/overlay.json" \
   -ldflags='-checklinkname=0 -extldflags=-Wl,-z,separate-code' -o "$output/formula-bench" ./benchmark
+gcc -O2 -o "$output/reboot" "$repo/benchmarks/reboot.c"
 chmod 755 "$output" "$output/formula-bench"
 go version > "$output/toolchain.txt"
 gcc --version >> "$output/toolchain.txt"
