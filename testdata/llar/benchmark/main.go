@@ -45,6 +45,7 @@ type result struct {
 	ID         int    `json:"id"`
 	DurationNS int64  `json:"duration_ns"`
 	EntryNS    int64  `json:"entry_ns,omitempty"`
+	CallbackNS int64  `json:"callback_ns,omitempty"`
 	Metadata   string `json:"metadata,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -113,13 +114,20 @@ func run(started time.Time) error {
 	}
 	defer s.Close()
 	entries := make(chan time.Time, 1)
-	if *backend == "sandbox" && *concurrency == 1 {
+	callbacks := make(chan time.Time, 1)
+	if *backend == "sandbox" {
 		// The benchmark build inserts this getpid at guestEntry's first line.
 		// Only serial runs report per-call entry latency; no cross-call guessing.
 		s.Inspect = func(call *sandbox.Syscall) {
-			if call.Number == unix.SYS_GETPID && call.Args[0] == entryMarker {
+			if *concurrency != 1 || call.Number != unix.SYS_GETPID {
+				return
+			}
+			if call.Args[0] == entryMarker {
 				entries <- time.Now()
 				emit(map[string]any{"event": "guest_entry"})
+			} else if call.Args[0] == entryMarker+1 {
+				callbacks <- time.Now()
+				emit(map[string]any{"event": "callback_start"})
 			}
 		}
 	}
@@ -142,6 +150,11 @@ func run(started time.Time) error {
 				select {
 				case entry := <-entries:
 					r.EntryNS = entry.Sub(t0).Nanoseconds()
+				default:
+				}
+				select {
+				case callback := <-callbacks:
+					r.CallbackNS = callback.Sub(t0).Nanoseconds()
 				default:
 				}
 				if err != nil {
@@ -181,8 +194,12 @@ func execute(j job, backend string, s *sandbox.Sandbox) (err error) {
 	}()
 	build, ctx := j.build, j.ctx
 	if backend == "sandbox" {
-		err = s.Run(func() { build(ctx) })
+		err = s.Run(func() {
+			unix.RawSyscall(unix.SYS_GETPID, entryMarker+1, 0, 0)
+			build(ctx)
+		})
 	} else {
+		emit(map[string]any{"event": "callback_start"})
 		build(ctx)
 	}
 	if err != nil {
