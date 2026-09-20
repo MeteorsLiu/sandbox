@@ -5,11 +5,11 @@ package state
 
 import "io"
 
-// writer fills caller-owned memory. Exhaustion returns an error without
-// growing the buffer, so a shared mapping remains the destination throughout.
+// writer encodes into caller-owned memory or an output stream.
 type writer struct {
 	mem []byte
 	pos int
+	out io.Writer
 }
 
 func (w *writer) put(obj object) error {
@@ -17,6 +17,17 @@ func (w *writer) put(obj object) error {
 }
 
 func (w *writer) writeBytes(p []byte) {
+	if w.out != nil {
+		n, err := w.out.Write(p)
+		w.pos += n
+		if err != nil {
+			panic(err)
+		}
+		if n != len(p) {
+			panic(io.ErrShortWrite)
+		}
+		return
+	}
 	if len(p) > len(w.mem)-w.pos {
 		panic(io.ErrShortBuffer)
 	}
@@ -24,6 +35,17 @@ func (w *writer) writeBytes(p []byte) {
 }
 
 func (w *writer) writeString(s string) {
+	if w.out != nil {
+		n, err := io.WriteString(w.out, s)
+		w.pos += n
+		if err != nil {
+			panic(err)
+		}
+		if n != len(s) {
+			panic(io.ErrShortWrite)
+		}
+		return
+	}
 	if len(s) > len(w.mem)-w.pos {
 		panic(io.ErrShortBuffer)
 	}

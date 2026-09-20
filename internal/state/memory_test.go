@@ -65,6 +65,14 @@ func TestMemoryObjects(t *testing.T) {
 			if backing[0] != 0xa5 || backing[len(backing)-1] != 0xa5 || &w.mem[0] != &backing[1] {
 				t.Fatal("writer changed its backing memory or wrote beyond it")
 			}
+			var stream bytes.Buffer
+			streamed := writer{out: &stream}
+			if err := streamed.put(obj); err != nil {
+				t.Fatal(err)
+			}
+			if streamed.pos != w.pos || !bytes.Equal(stream.Bytes(), w.mem[:w.pos]) {
+				t.Fatal("stream output differs from memory output")
+			}
 			r := reader{mem: w.mem[:w.pos]}
 			got, err := r.get()
 			if err != nil || r.pos != w.pos {
