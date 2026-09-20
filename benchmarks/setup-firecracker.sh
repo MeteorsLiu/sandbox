@@ -28,6 +28,18 @@ mkdir "$output/rootfs"
 container=$(docker create "$image")
 docker export "$container" | tar --numeric-owner -xf - -C "$output/rootfs"
 docker rm "$container"
+docker image inspect "$image" > "$output/image.json"
+python3 - "$output" <<'PY'
+import json, pathlib, re, shlex, sys
+out = pathlib.Path(sys.argv[1])
+image = json.loads((out/"image.json").read_text())[0]
+lines = []
+for entry in image["Config"]["Env"]:
+    key, value = entry.split("=", 1)
+    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+    lines.append(f"export {key}={shlex.quote(value)}")
+(out/"rootfs/opt/benchmark/environment.sh").write_text("\n".join(lines)+"\n")
+PY
 truncate -s 3G "$output/rootfs.ext4"
 mkfs.ext4 -q -F -d "$output/rootfs" "$output/rootfs.ext4"
 chmod -R a+rX "$output"
