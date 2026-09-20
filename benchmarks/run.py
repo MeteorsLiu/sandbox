@@ -151,6 +151,20 @@ def main():
         entries = [e["observed_ns"] for e in record["events"] if e["event"] == expected]
         record["launch_to_entry_ns"] = entries[0] if entries else None
         outcomes = [e for e in record["events"] if e["event"] == "result"]
+        if backend == "sandbox" and concurrency == 1:
+            start = None
+            phase_times = {}
+            for event in record["events"]:
+                if event["event"] == "run_start":
+                    start = event["observed_ns"]
+                    phase_times = {}
+                elif start is not None and event["event"] in ("guest_entry", "callback_start"):
+                    phase_times[event["event"]] = event["observed_ns"] - start
+                elif event["event"] == "result":
+                    if "guest_entry" in phase_times:
+                        event["entry_ns"] = phase_times["guest_entry"]
+                    if "callback_start" in phase_times:
+                        event["callback_ns"] = phase_times["callback_start"]
         record["success"] = record["exit_code"] == 0 and not record["event_errors"] and len(outcomes) == count and all(not e.get("error") for e in outcomes)
         with lock:
             active.remove(cid)

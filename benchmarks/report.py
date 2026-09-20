@@ -2,6 +2,7 @@
 """Summarize retained samples without hiding unsuccessful builds."""
 import csv
 import json
+import math
 import pathlib
 import sys
 
@@ -13,16 +14,24 @@ for path in sorted(root.glob("*-c*.json")):
         continue
     starts = [r["launch_to_entry_ns"]/1e6 for r in data["records"] if r.get("launch_to_entry_ns") is not None]
     entries = [e["entry_ns"]/1e6 for r in data["records"] for e in r["events"] if e.get("entry_ns")]
-    def median(values):
-        return round(sorted(values)[len(values)//2], 3) if values else ""
+    callbacks = [e["callback_ns"]/1e6 for r in data["records"] for e in r["events"] if e.get("callback_ns")]
+    def percentile(values, p):
+        return round(sorted(values)[math.ceil(len(values)*p/100)-1], 3) if values else ""
     rows.append({"backend": data["backend"], "concurrency": data["concurrency"],
                  "success": f"{data['successful']}/{data['count']}",
                  "builds_per_second": round(data["builds_per_second"], 4),
                  "build_p50_ms": round(data["build_latency"]["p50_ns"]/1e6, 3) if data["build_latency"] else "N/A",
                  "build_p95_ms": round(data["build_latency"]["p95_ns"]/1e6, 3) if data["build_latency"] else "N/A",
                  "peak_memory_mib": round(data["memory_peak_bytes"]/1048576, 2),
-                 "launch_to_entry_p50_ms": median(starts), "run_to_entry_p50_ms": median(entries),
-                 "oom_killed": data.get("oom_killed", "unrecorded")})
+                 "launch_to_entry_p50_ms": percentile(starts, 50),
+                 "launch_to_entry_p95_ms": percentile(starts, 95),
+                 "launch_to_entry_p99_ms": percentile(starts, 99),
+                 "run_to_entry_p50_ms": percentile(entries, 50),
+                 "run_to_callback_p50_ms": percentile(callbacks, 50),
+                 "run_to_entry_first_ms": entries[0] if entries else "",
+                 "run_to_entry_warm_p50_ms": percentile(entries[1:], 50),
+                 "oom_killed": data.get("oom_killed", "unrecorded"),
+                 "event_errors": data.get("event_errors", 0)})
 if not rows:
     raise SystemExit("no batch result files")
 with (root/"summary.csv").open("w") as f:

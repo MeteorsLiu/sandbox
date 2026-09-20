@@ -14,7 +14,7 @@ text = source.read_text()
 entry = "func guestEntry() {\n"
 assert text.count(entry) == 1
 replacement = output / "guest_linux.go"
-replacement.write_text(text.replace(entry, entry + "\tunix.RawSyscall(unix.SYS_GETPID, 0x53424d31, 0, 0)\n"))
+replacement.write_text(text.replace(entry, entry + '\tif _, err := os.Stdout.WriteString("BENCH:{\\"event\\":\\"guest_entry\\"}\\n"); err != nil { panic(err) }\n'))
 (output / "overlay.json").write_text(json.dumps({"Replace": {str(source): str(replacement)}}))
 PY
 go -C "$repo/testdata/llar" build -mod=readonly -overlay="$output/overlay.json" \

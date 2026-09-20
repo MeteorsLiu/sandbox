@@ -17,10 +17,7 @@ import (
 	formulapkg "github.com/goplus/llar/formula"
 	"github.com/goplus/llar/internal/formula"
 	"github.com/xgo-dev/sandbox"
-	"golang.org/x/sys/unix"
 )
-
-const entryMarker = 0x53424d31
 
 var outputMu sync.Mutex
 
@@ -44,8 +41,6 @@ type result struct {
 	Event      string `json:"event"`
 	ID         int    `json:"id"`
 	DurationNS int64  `json:"duration_ns"`
-	EntryNS    int64  `json:"entry_ns,omitempty"`
-	CallbackNS int64  `json:"callback_ns,omitempty"`
 	Metadata   string `json:"metadata,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -113,24 +108,6 @@ func run(started time.Time) error {
 		Env: os.Environ(),
 	}
 	defer s.Close()
-	entries := make(chan time.Time, 1)
-	callbacks := make(chan time.Time, 1)
-	if *backend == "sandbox" {
-		// The benchmark build inserts this getpid at guestEntry's first line.
-		// Only serial runs report per-call entry latency; no cross-call guessing.
-		s.Inspect = func(call *sandbox.Syscall) {
-			if *concurrency != 1 || call.Number != unix.SYS_GETPID {
-				return
-			}
-			if call.Args[0] == entryMarker {
-				entries <- time.Now()
-				emit(map[string]any{"event": "guest_entry"})
-			} else if call.Args[0] == entryMarker+1 {
-				callbacks <- time.Now()
-				emit(map[string]any{"event": "callback_start"})
-			}
-		}
-	}
 	emit(map[string]any{"event": "ready", "backend": *backend, "count": *count, "concurrency": *concurrency, "prepare_ns": time.Since(started).Nanoseconds()})
 	queue := make(chan int)
 	results := make(chan result, *count)
@@ -142,21 +119,14 @@ func run(started time.Time) error {
 			defer workers.Done()
 			for id := range queue {
 				t0 := time.Now()
+				if *concurrency == 1 {
+					emit(map[string]any{"event": "run_start", "id": id})
+				}
 				r := result{Event: "result", ID: id}
 				j := jobs[id]
 				j.build = builds[worker]
 				err := execute(j, *backend, &s)
 				r.DurationNS = time.Since(t0).Nanoseconds()
-				select {
-				case entry := <-entries:
-					r.EntryNS = entry.Sub(t0).Nanoseconds()
-				default:
-				}
-				select {
-				case callback := <-callbacks:
-					r.CallbackNS = callback.Sub(t0).Nanoseconds()
-				default:
-				}
 				if err != nil {
 					r.Error = err.Error()
 				} else {
@@ -195,7 +165,9 @@ func execute(j job, backend string, s *sandbox.Sandbox) (err error) {
 	build, ctx := j.build, j.ctx
 	if backend == "sandbox" {
 		err = s.Run(func() {
-			unix.RawSyscall(unix.SYS_GETPID, entryMarker+1, 0, 0)
+			if _, err := os.Stdout.WriteString("BENCH:{\"event\":\"callback_start\"}\n"); err != nil {
+				panic(err)
+			}
 			build(ctx)
 		})
 	} else {
