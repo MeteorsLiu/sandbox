@@ -176,6 +176,9 @@ func TestReflectxNativeMethodProcess(t *testing.T) {
 	embed := func(receiver any, tag reflect.StructTag) reflect.Value {
 		value := reflect.ValueOf(receiver)
 		typ := reflect.StructOf([]reflect.StructField{{Name: value.Type().Elem().Name(), Type: value.Type(), Anonymous: true, Tag: tag}})
+		// A dynamic name makes the promoted native methods part of the
+		// reflectxtype snapshot exercised by this fixture.
+		reflectx.SetTypeName(typ, "example/native", "Embedded"+value.Type().Elem().Name())
 		result := reflect.New(typ).Elem()
 		result.Field(0).Set(value)
 		return result

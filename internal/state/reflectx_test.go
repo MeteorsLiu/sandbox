@@ -210,7 +210,7 @@ func TestReflectxStateInterfaceAndFields(t *testing.T) {
 func TestReflectxStateInvalidReference(t *testing.T) {
 	src := reflectxFixture().Type
 	reflect.SliceOf(src)
-	snapshot, err := reflectxtype.Export()
+	snapshot, err := reflectxtype.Export([]reflect.Type{src})
 	if err != nil {
 		t.Fatal(err)
 	}

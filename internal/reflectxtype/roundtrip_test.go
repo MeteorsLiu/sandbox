@@ -14,7 +14,7 @@ import (
 
 func TestRetainedTypeIDs(t *testing.T) {
 	original := sampleTypes()
-	sent, err := Export()
+	sent, err := Export(original)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,9 @@ func TestRetainedTypeIDs(t *testing.T) {
 	}
 	added := reflectx.NamedTypeOf("example/return", "Added", reflect.SliceOf(node))
 	reflect.SliceOf(added)
-	returned, err := guest.Export()
+	unrelated := reflectx.NamedTypeOf("example/return", "Unrelated", reflect.TypeFor[int]())
+	reflect.SliceOf(unrelated)
+	returned, err := guest.Export([]reflect.Type{added})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +42,9 @@ func TestRetainedTypeIDs(t *testing.T) {
 	}
 	if returned.IDs[added] <= uint32(len(sent.IDs)) {
 		t.Fatal("new type reused a retained ID")
+	}
+	if returned.IDs[unrelated] != 0 {
+		t.Fatal("return exported an unrelated cached type")
 	}
 	host, err := sent.Open(returned.Data)
 	if err != nil {
@@ -55,7 +60,7 @@ func TestRetainedTypeIDs(t *testing.T) {
 	if err != nil || got == added || got.Elem() != original[0] {
 		t.Fatalf("new type did not resolve its retained dependency: %v, %v", got, err)
 	}
-	again, err := host.Export()
+	again, err := host.Export(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +76,7 @@ func TestRetainedTypeIDs(t *testing.T) {
 func TestRetainedTypeDefinitionChanged(t *testing.T) {
 	typ := reflectx.NamedTypeOf("example/retained", "OriginalName", reflect.TypeFor[int]())
 	reflect.SliceOf(typ)
-	snapshot, err := Export()
+	snapshot, err := Export([]reflect.Type{typ})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +123,7 @@ func TestRetainedMethodIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	reflect.SliceOf(typ)
-	sent, err := Export()
+	sent, err := Export([]reflect.Type{typ})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +155,7 @@ func TestRetainedMethodIDs(t *testing.T) {
 	if current[1].Name != "execWith" || current[1].PkgPath != "example/b" {
 		t.Fatalf("fixture did not reorder methods: %v", current)
 	}
-	returned, err := guest.Export()
+	returned, err := guest.Export(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +197,7 @@ func TestMethodInterfacePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	reflect.SliceOf(typ)
-	snapshot, err := Export()
+	snapshot, err := Export([]reflect.Type{typ})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +232,7 @@ func TestMethodInterfacePolicy(t *testing.T) {
 	if got := method.Func.Call([]reflect.Value{value})[0].Int(); got != 42 {
 		t.Fatalf("reflection method returned %d, want 42", got)
 	}
-	if _, err := table.Export(); err != nil {
+	if _, err := table.Export(nil); err != nil {
 		t.Fatalf("interface policy changed during return: %v", err)
 	}
 }

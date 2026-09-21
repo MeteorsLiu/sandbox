@@ -637,7 +637,7 @@ func (es *encodeState) findType(typ reflect.Type) typeSpec {
 		return ref
 	}
 	// Static types need not occur in reflect's caches. SliceOf always caches
-	// its result, making typ a dependency discoverable by parameterless Export.
+	// its result, making typ a dependency discoverable by reflecttype.Export.
 	// For example, this includes a named struct passed only as a reflect.Type.
 	reflect.SliceOf(typ)
 	if es.reflected == nil {
@@ -926,20 +926,21 @@ func (es *encodeState) Save(obj reflect.Value) {
 			if err != nil {
 				Failf("export reflect types: %w", err)
 			}
-			needExtended := extended != nil
+			var roots []reflect.Type
 			for typ := range es.reflected {
 				if snapshot.IDs[typ] == 0 {
-					needExtended = true
-					break
+					roots = append(roots, typ)
 				}
 			}
-			if !needExtended {
+			if len(roots) == 0 && extended == nil {
 				break
 			}
+			// Only this graph's types may add method environments. A global
+			// cache can also contain types owned by unrelated interpreters.
 			if es.reflectx != nil {
-				extended, err = es.reflectx.Export()
+				extended, err = es.reflectx.Export(roots)
 			} else {
-				extended, err = reflectxtype.Export()
+				extended, err = reflectxtype.Export(roots)
 			}
 			if err != nil {
 				Failf("export reflectx types: %w", err)

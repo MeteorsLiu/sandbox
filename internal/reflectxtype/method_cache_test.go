@@ -74,7 +74,7 @@ func TestMethodCacheIdentity(t *testing.T) {
 			}
 
 			// Export keeps both types. Only an already-shared method gets one ID.
-			sent, err := Export()
+			sent, err := Export(originals[:])
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestMethodCacheIdentity(t *testing.T) {
 			t.Logf("import: %d icall slots; First{10}.Read()=%d, Second{20}.Read()=%d", after-before, results[0], results[1])
 
 			// Returning preserves IDs and reuses the original host type identities.
-			returned, err := guest.Export()
+			returned, err := guest.Export(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
