@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"testing/sandboxdriver"
 
@@ -26,11 +27,18 @@ func TestMain(m *testing.M) {
 			continue
 		}
 		code, completed := 1, false
+		executable, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		binaryDir := filepath.Dir(executable)
 		s := sandbox.Sandbox{
 			Library: os.Getenv("SANDBOX_TEST_LIBRARY"),
 			Mounts: []sandbox.Mount{
 				{Type: "bind", Source: "/", Target: "/", Options: []string{"ro"}},
 				{Type: "tmpfs", Target: "/tmp"},
+				{Type: "bind", Source: binaryDir, Target: binaryDir, Options: []string{"ro"}},
 				{Type: "proc", Target: "/proc"},
 			},
 		}

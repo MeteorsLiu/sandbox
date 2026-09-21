@@ -1,0 +1,97 @@
+package ixgo
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/tools/go/ssa"
+)
+
+// Installed by the external test package to avoid an ixgo -> sandbox import
+// cycle. A migration failure panics so expected interpreter errors cannot hide it.
+var SandboxTestRoundTrip func(func())
+
+func SandboxTestRunFile(ctx *Context, filename string, src interface{}, args []string) (int, error) {
+	pkg, err := ctx.LoadFile(filename, src)
+	if err != nil {
+		return 2, err
+	}
+	return SandboxTestRunPkg(ctx, pkg, filename, args)
+}
+
+func SandboxTestRun(ctx *Context, path string, args []string) (int, error) {
+	if strings.HasSuffix(path, ".go") {
+		return SandboxTestRunFile(ctx, path, nil, args)
+	}
+	pkg, err := ctx.LoadDir(path, false)
+	if err != nil {
+		return 2, err
+	}
+	if !isMainPkg(pkg) {
+		return 2, ErrNotFoundMain
+	}
+	return SandboxTestRunPkg(ctx, pkg, path, args)
+}
+
+func SandboxTestRunPkg(ctx *Context, pkg *ssa.Package, input string, args []string) (int, error) {
+	interp, err := ctx.NewInterp(pkg)
+	if err != nil {
+		return 2, err
+	}
+	defer interp.UnsafeRelease()
+	return SandboxTestRunInterp(ctx, interp, input, args)
+}
+
+func SandboxTestRunInterp(ctx *Context, interp *Interp, input string, args []string) (code int, err error) {
+	SandboxTestRoundTrip(func() { code, err = ctx.RunInterp(interp, input, args) })
+	return
+}
+
+func SandboxTestRunMain(interp *Interp) (code int, err error) {
+	SandboxTestRoundTrip(func() { code, err = interp.RunMain() })
+	return
+}
+
+func SandboxTestRunInit(interp *Interp) (err error) {
+	SandboxTestRoundTrip(func() { err = interp.RunInit() })
+	return
+}
+
+func SandboxTestInterpRunFunc(interp *Interp, name string, args ...Value) (value Value, err error) {
+	SandboxTestRoundTrip(func() { value, err = interp.RunFunc(name, args...) })
+	return
+}
+
+func SandboxTestContextRunFunc(ctx *Context, pkg *ssa.Package, name string, args ...Value) (Value, error) {
+	interp, err := ctx.NewInterp(pkg)
+	if err != nil {
+		return nil, err
+	}
+	return SandboxTestInterpRunFunc(interp, name, args...)
+}
+
+func SandboxTestRunTest(ctx *Context, dir string, args []string) error {
+	pkg, err := ctx.LoadDir(dir, true)
+	if err != nil {
+		if err == ErrNoTestFiles {
+			return nil
+		}
+		return err
+	}
+	if filepath.IsAbs(dir) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if err := os.Chdir(dir); err != nil {
+			return err
+		}
+		defer os.Chdir(wd)
+	}
+	code, err := SandboxTestRunPkg(ctx, pkg, dir, args)
+	if err != nil || code != 0 {
+		return ErrTestFailed
+	}
+	return nil
+}
