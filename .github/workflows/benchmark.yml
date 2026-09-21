@@ -3,7 +3,7 @@ name: Formula benchmark
 on:
   workflow_dispatch:
   push:
-    branches: [codex/benchmark-accounting]
+    branches: [codex/benchmark-rooted-accounting]
     paths:
       - 'benchmarks/**'
       - 'testdata/llar/benchmark/**'
@@ -46,7 +46,7 @@ jobs:
               3) order=sandbox,firecracker,docker ;;
             esac
             mkdir -p "results/cold/trial-$trial"
-            sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/cold/trial-$trial" --backends "$order" --firecracker-assets /tmp/firecracker-benchmark --concurrency 1 --builds 1 | tee "results/cold/trial-$trial/summary.jsonl"
+            sudo python3 benchmarks/engine_memory.py --output "$PWD/results/cold/trial-$trial/engine-memory.jsonl" -- python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/cold/trial-$trial" --backends "$order" --firecracker-assets /tmp/firecracker-benchmark --concurrency 1 --builds 1 | tee "results/cold/trial-$trial/summary.jsonl"
           done
       - uses: actions/upload-artifact@v4
         if: always()
@@ -57,7 +57,7 @@ jobs:
         if: ${{ !cancelled() && steps.firecracker.outcome == 'success' }}
         run: |
           mkdir -p results/firecracker
-          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/firecracker" --backends firecracker --firecracker-assets /tmp/firecracker-benchmark --concurrency 1,2,4,8 --builds 8 | tee results/firecracker/summary.jsonl
+          sudo python3 benchmarks/engine_memory.py --output "$PWD/results/firecracker/engine-memory.jsonl" -- python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/firecracker" --backends firecracker --firecracker-assets /tmp/firecracker-benchmark --concurrency 1,2,4,8 --builds 8 | tee results/firecracker/summary.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -67,7 +67,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           mkdir -p results/docker
-          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/docker" --backends docker --concurrency 1,2,4,8 --builds 8 | tee results/docker/summary.jsonl
+          sudo python3 benchmarks/engine_memory.py --output "$PWD/results/docker/engine-memory.jsonl" -- python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/docker" --backends docker --concurrency 1,2,4,8 --builds 8 | tee results/docker/summary.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -77,7 +77,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: |
           mkdir -p results/sandbox
-          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/sandbox" --backends sandbox --concurrency 1,2,4,8 --builds 8 | tee results/sandbox/summary.jsonl
+          sudo python3 benchmarks/engine_memory.py --output "$PWD/results/sandbox/engine-memory.jsonl" -- python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/sandbox" --backends sandbox --concurrency 1,2,4,8 --builds 8 | tee results/sandbox/summary.jsonl
       - name: Save exact guest kernel and VMM identities
         if: always()
         run: |
