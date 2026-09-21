@@ -271,27 +271,32 @@ func checkOriginalMethodRecords(t *testing.T, es *encodeState, data []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	methods, ok := encoded.(*arrayValue)
+	methods, ok := encoded.(*multipleObjects)
 	if !ok {
 		t.Fatalf("method table is %T", encoded)
 	}
 	var native, dynamic int
-	for _, record := range methods.Contents {
-		value, ok := record.(*reflectedValue)
-		if !ok || value.Addressable {
-			t.Fatalf("method is not an original function value: %T", record)
-		}
-		fn, ok := value.Value.(*functionValue)
-		if !ok {
-			t.Fatalf("method payload is %T", value.Value)
-		}
-		if uintptr(fn.PC) == makeFuncPC {
+	for _, record := range *methods {
+		switch value := record.(type) {
+		case *functionValue:
 			dynamic++
-		} else {
+			if uintptr(value.PC) == makeFuncPC {
+				t.Fatal("dynamic method kept its outer MakeFunc wrapper")
+			}
+		case *reflectedValue:
 			native++
+			if value.Addressable {
+				t.Fatal("native method is not an original function value")
+			}
+			fn, ok := value.Value.(*functionValue)
+			if !ok {
+				t.Fatalf("method payload is %T", value.Value)
+			}
 			if fn.Env.Root != 0 {
 				t.Fatalf("native method acquired a wrapper environment: %v", fn.Env)
 			}
+		default:
+			t.Fatalf("invalid method record: %T", record)
 		}
 	}
 	if native == 0 || dynamic == 0 {
