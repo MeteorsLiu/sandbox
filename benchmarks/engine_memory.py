@@ -7,6 +7,8 @@ import subprocess
 import threading
 import time
 
+from memory import callback_memory, resident_memory
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -55,6 +57,7 @@ def main():
                 raise RuntimeError(f"container and service cgroups overlap: {path}")
             try:
                 containers[cid] = memory(path)
+                containers[cid]["resident"] = resident_memory(path)
             except FileNotFoundError:
                 # A completed container can disappear between the directory
                 # listing and the read. Service cgroups must remain available.
@@ -69,7 +72,7 @@ def main():
                 if name not in ("dockerd", "containerd") and not name.startswith("containerd-shim"):
                     continue
                 group = (proc / "cgroup").read_text().strip().removeprefix("0::")
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue
             path = root / group.lstrip("/")
             if not any(service == path or service in path.parents for service in paths):
@@ -122,6 +125,8 @@ def main():
             "metric": "Sum of disjoint cgroup-v2 memory.current reads in each sample; includes cache and shared Docker services once",
             "excluded": "benchmark controller and its Docker CLI clients; host kernel outside these cgroups",
         }
+        data["callback_memory"] = callback_memory(data, window)
+        errors.extend(f"{path.name}: {error}" for error in data["callback_memory"]["errors"])
         path.write_text(json.dumps(data, indent=2) + "\n")
     if errors:
         raise SystemExit("engine memory sampling failed: " + "; ".join(errors))

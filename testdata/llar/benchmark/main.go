@@ -119,13 +119,11 @@ func run(started time.Time) error {
 			defer workers.Done()
 			for id := range queue {
 				t0 := time.Now()
-				if *concurrency == 1 {
-					emit(map[string]any{"event": "run_start", "id": id})
-				}
+				emit(map[string]any{"event": "run_start", "id": id})
 				r := result{Event: "result", ID: id}
 				j := jobs[id]
 				j.build = builds[worker]
-				err := execute(j, *backend, &s)
+				err := execute(j, *backend, &s, id)
 				r.DurationNS = time.Since(t0).Nanoseconds()
 				if err != nil {
 					r.Error = err.Error()
@@ -156,23 +154,29 @@ func run(started time.Time) error {
 	return nil
 }
 
-func execute(j job, backend string, s *sandbox.Sandbox) (err error) {
+func execute(j job, backend string, s *sandbox.Sandbox, id int) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("Formula panic: %v", p)
 		}
 	}()
 	build, ctx := j.build, j.ctx
+	start := fmt.Sprintf("BENCH:{\"event\":\"callback_start\",\"id\":%d}\n", id)
+	end := fmt.Sprintf("BENCH:{\"event\":\"callback_end\",\"id\":%d}\n", id)
 	if backend == "sandbox" {
 		err = s.Run(func() {
-			if _, err := os.Stdout.WriteString("BENCH:{\"event\":\"callback_start\"}\n"); err != nil {
+			if _, err := os.Stdout.WriteString(start); err != nil {
 				panic(err)
 			}
 			build(ctx)
+			if _, err := os.Stdout.WriteString(end); err != nil {
+				panic(err)
+			}
 		})
 	} else {
-		emit(map[string]any{"event": "callback_start"})
+		emit(map[string]any{"event": "callback_start", "id": id})
 		build(ctx)
+		emit(map[string]any{"event": "callback_end", "id": id})
 	}
 	if err != nil {
 		return err
