@@ -5,7 +5,11 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"testing"
+
+	"golang.org/x/arch/arm64/arm64asm"
+	"golang.org/x/arch/x86/x86asm"
 )
 
 func TestClosureAllocationInstructions(t *testing.T) {
@@ -96,6 +100,10 @@ func TestClosureAllocationRegisterLiveness(t *testing.T) {
 		// LDR W3,[SP,#228]; AND X3,X3,#0xffffff, as in ixgo.makeInstr.
 		{"arm64-capture-before-pc", elf.EM_AARCH64, "e3e740b9635c4092", "", true},
 		{"arm64-capture-after-pc", elf.EM_AARCH64, "", "e3e740b9635c4092", true},
+		// TestImplicitMapConversion initializes reflect.Value.flag before F:
+		// LDR; CMP; MOV; MOV; CSEL; STR to stack; STR to the capture at +24.
+		{"arm64-reflect-capture-before-pc", elf.EM_AARCH64, "e14740b93f000071a10280d2a21280d22110829ae14300f9010c00f9", "", true},
+		{"arm64-select-after-pc", elf.EM_AARCH64, "", "8310859a", true},
 		{"arm64-compare", elf.EM_AARCH64, "", "1f0001eb", true},
 		{"arm64-pair-load", elf.EM_AARCH64, "", "e20f40a9", true},
 		{"arm64-overwrite-object-before-pc", elf.EM_AARCH64, "e003032a", "", false},
@@ -110,10 +118,22 @@ func TestClosureAllocationRegisterLiveness(t *testing.T) {
 		{"arm64-conditional-branch", elf.EM_AARCH64, "", "430000b4", false},
 		{"arm64-call", elf.EM_AARCH64, "", "02000094", false},
 		{"arm64-unknown", elf.EM_AARCH64, "", "c5fcfb88", false},
-		{"arm64-spill", elf.EM_AARCH64, "", "e10300f9", false},
+		{"arm64-spill", elf.EM_AARCH64, "", "e10300f9", true},
+		{"arm64-spill-reload-object", elf.EM_AARCH64, "", "e10300f9e00340f9", false},
+		{"arm64-capture-store", elf.EM_AARCH64, "", "030c00f9", true},
+		{"arm64-capture-pair-store", elf.EM_AARCH64, "", "020c01a9", true},
+		{"arm64-store-post-index-other", elf.EM_AARCH64, "", "438400f8", true},
+		{"arm64-store-post-index-object", elf.EM_AARCH64, "", "038400f8", false},
+		{"arm64-store-pre-index-object", elf.EM_AARCH64, "", "038c00f8", false},
+		{"arm64-store-post-index-pc", elf.EM_AARCH64, "", "238400f8", false},
+		{"arm64-pair-store-post-index-object", elf.EM_AARCH64, "", "020c81a8", false},
+		{"arm64-pair-store-pre-index-object", elf.EM_AARCH64, "", "020c81a9", false},
+		{"arm64-pair-store-pre-index-pc", elf.EM_AARCH64, "", "220c81a9", false},
 		// MOV EDX,[RSP+8]; AND EDX,0xffffff only affect the scalar capture.
 		{"amd64-capture-before-pc", elf.EM_X86_64, "8b54240881e2ffffff00", "", true},
 		{"amd64-capture-after-pc", elf.EM_X86_64, "", "8b54240881e2ffffff00", true},
+		{"amd64-select-before-pc", elf.EM_X86_64, "480f45d3", "", true},
+		{"amd64-select-after-pc", elf.EM_X86_64, "", "480f45d3", true},
 		{"amd64-compare", elf.EM_X86_64, "", "4839c8", true},
 		{"amd64-explicit-multiply", elf.EM_X86_64, "", "0fafd2", true},
 		{"amd64-overwrite-object-before-pc", elf.EM_X86_64, "31c0", "", false},
@@ -130,7 +150,9 @@ func TestClosureAllocationRegisterLiveness(t *testing.T) {
 		{"amd64-conditional-branch", elf.EM_X86_64, "", "7403", false},
 		{"amd64-call", elf.EM_X86_64, "", "e800000000", false},
 		{"amd64-unknown", elf.EM_X86_64, "", "06", false},
-		{"amd64-spill", elf.EM_X86_64, "", "48890c24", false},
+		{"amd64-spill", elf.EM_X86_64, "", "48890c24", true},
+		{"amd64-spill-reload-object", elf.EM_X86_64, "", "48890c24488b0424", false},
+		{"amd64-capture-store", elf.EM_X86_64, "", "48895018", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			head, address, store := "000000d000000091fe030094", "010000f021000091", "010000f9"
@@ -154,6 +176,73 @@ func TestClosureAllocationRegisterLiveness(t *testing.T) {
 				t.Fatalf("accepted overwritten or unproven register: %#v", got)
 			}
 		})
+	}
+}
+
+func TestClosureConditionalRegisters(t *testing.T) {
+	for _, test := range []struct {
+		op   arm64asm.Op
+		word uint32
+	}{
+		{arm64asm.CSEL, 0x9a851083},
+		{arm64asm.CSINC, 0x9a851483},
+		{arm64asm.CSINV, 0xda851083},
+		{arm64asm.CSNEG, 0xda851483},
+		{arm64asm.CINC, 0x9a840483},
+		{arm64asm.CINV, 0xda840083},
+		{arm64asm.CNEG, 0xda840483},
+		{arm64asm.CSET, 0x9a9f07e3},
+		{arm64asm.CSETM, 0xda9f03e3},
+	} {
+		for _, width := range []int{32, 64} {
+			for _, dst := range []uint32{0, 1, 3} {
+				t.Run(fmt.Sprintf("arm64/%s/%d/R%d", test.op, width, dst), func(t *testing.T) {
+					word := test.word&^31 | dst
+					if width == 32 {
+						word &^= 1 << 31
+					}
+					var code [4]byte
+					binary.LittleEndian.PutUint32(code[:], word)
+					inst, err := arm64asm.Decode(code[:])
+					if err != nil || inst.Op != test.op {
+						t.Fatalf("decode: %v, %v", inst, err)
+					}
+					if got := armPreservesRegisters(inst, arm64asm.X1); got != (dst == 3) {
+						t.Fatalf("%s preserves object X0 and PC X1: %v", inst, got)
+					}
+				})
+			}
+		}
+	}
+	// CMOVcc covers all 16 conditions; 16/32-bit destinations also invalidate
+	// their tracked 64-bit register. A memory source does not change its base.
+	for condition := byte(0); condition < 16; condition++ {
+		for _, width := range []int{16, 32, 64} {
+			for _, dst := range []byte{0, 1, 3} {
+				for _, memory := range []bool{false, true} {
+					t.Run(fmt.Sprintf("amd64/condition%d/%d/R%d/memory%v", condition, width, dst, memory), func(t *testing.T) {
+						var code []byte
+						if width == 16 {
+							code = append(code, 0x66)
+						} else if width == 64 {
+							code = append(code, 0x48)
+						}
+						modrm := byte(0xc2) | dst<<3 // Source RDX/EDX/DX.
+						if memory {
+							modrm = dst << 3 // Source [RAX].
+						}
+						code = append(code, 0x0f, 0x40+condition, modrm)
+						inst, err := x86asm.Decode(code, 64)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if got := x86PreservesRegisters(inst, x86asm.RCX); got != (dst == 3) {
+							t.Fatalf("%s preserves object RAX and PC RCX: %v", inst, got)
+						}
+					})
+				}
+			}
+		}
 	}
 }
 
