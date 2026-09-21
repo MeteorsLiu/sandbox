@@ -1,0 +1,76 @@
+name: Formula benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Check native Linux and KVM
+        run: |
+          uname -a
+          lscpu
+          test -c /dev/kvm
+          ls -l /dev/kvm
+          docker info
+          python3 -m unittest discover -s benchmarks -p '*_test.py'
+      - name: Build common payload and toolchain image
+        run: docker build --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" -f benchmarks/Dockerfile -t sandbox-formula-bench:ci .
+      - name: Export common filesystem and prepare native Firecracker
+        run: sudo bash benchmarks/setup-firecracker.sh sandbox-formula-bench:ci /tmp/firecracker-benchmark
+      - name: Save experiment identities
+        run: |
+          mkdir -p results
+          git rev-parse HEAD > results/source-revision.txt
+          git rev-parse HEAD^ > results/upstream-base.txt
+          cp /tmp/firecracker-benchmark/{kernel.json,checksums.txt,image.json} results/
+          cp /tmp/firecracker-benchmark/rootfs/opt/benchmark/{toolchain.txt,binaries.sha256} results/
+          cp /tmp/firecracker-benchmark/rootfs/opt/benchmark/input/manifest.json results/input-manifest.json
+          lscpu > results/cpu.txt
+          uname -a > results/kernel.txt
+      - name: Verify native launch and equal build work, outside measurement
+        run: |
+          sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$PWD/results/preflight" --backends sandbox,docker,firecracker --firecracker-assets /tmp/firecracker-benchmark --concurrency 1 --builds 1
+          python3 benchmarks/audit.py results
+      - name: Measure timing without memory sampling, three rotated rounds
+        run: |
+          for trial in 1 2 3; do
+            case "$trial" in
+              1) order=firecracker,docker,sandbox ;;
+              2) order=docker,sandbox,firecracker ;;
+              3) order=sandbox,firecracker,docker ;;
+            esac
+            for backend in ${order//,/ }; do
+              dir="$PWD/results/timing/trial-$trial/$backend"
+              mkdir -p "$dir"
+              sudo python3 benchmarks/run.py --image sandbox-formula-bench:ci --output "$dir" --backends "$backend" --firecracker-assets /tmp/firecracker-benchmark --concurrency 1,2,4,8 --builds 8 | tee "$dir/summary.jsonl"
+            done
+          done
+      - name: Measure memory separately on the native host
+        run: |
+          for backend in sandbox docker firecracker; do
+            dir="$PWD/results/memory/$backend"
+            mkdir -p "$dir"
+            sudo python3 benchmarks/engine_memory.py --output "$dir/engine-memory.jsonl" -- python3 benchmarks/run.py --measure memory --image sandbox-formula-bench:ci --output "$dir" --backends "$backend" --firecracker-assets /tmp/firecracker-benchmark --concurrency 1,2,4,8 --builds 8 | tee "$dir/summary.jsonl"
+          done
+      - name: Verify work equivalence and summarize
+        if: ${{ !cancelled() }}
+        run: |
+          python3 benchmarks/audit.py results | tee results/audit.json
+          python3 benchmarks/report.py results | tee results/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: formula-benchmark-native-amd64
+          path: results/
