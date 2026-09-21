@@ -71,7 +71,7 @@ func TestStructTypeIsolation(t *testing.T) {
 					t.Fatal("pointer lost its element identity")
 				}
 			}
-			returned, err := guest.Export()
+			returned, err := guest.Export(nil)
 			if err != nil {
 				t.Fatal(err)
 			}

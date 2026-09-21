@@ -143,7 +143,7 @@ func assertType(t *testing.T, want, got reflect.Type, seen map[reflect.Type]refl
 
 func TestRoundTrip(t *testing.T) {
 	want := sampleTypes()
-	snapshot, err := Export()
+	snapshot, err := Export(want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestRoundTrip(t *testing.T) {
 	for _, typ := range want {
 		id := snapshot.IDs[typ]
 		if id == 0 {
-			t.Fatalf("missing cached type %v", typ)
+			t.Fatalf("missing root type %v", typ)
 		}
 		value, err := got.Resolve(id)
 		if err != nil {
@@ -174,7 +174,7 @@ func TestRoundTrip(t *testing.T) {
 	if _, err := got.Resolve(uint32(len(got.types)) + 1); err == nil {
 		t.Fatal("accepted unknown ID")
 	}
-	second, err := Export()
+	second, err := Export([]reflect.Type{seen[want[0]]})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestFreshProcess(t *testing.T) {
 		return
 	}
 	node := sampleTypes()[0]
-	snapshot, err := Export()
+	snapshot, err := Export([]reflect.Type{node})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestFreshProcess(t *testing.T) {
 
 func TestDefaultCache(t *testing.T) {
 	typ := reflectx.InterfaceOf(nil, []reflect.Method{{Name: "DefaultCache", Type: reflect.TypeFor[func()]()}})
-	snapshot, err := Export()
+	snapshot, err := Export([]reflect.Type{typ})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestRecursiveStorage(t *testing.T) {
 	for _, typ := range want {
 		reflect.SliceOf(typ)
 	}
-	snapshot, err := Export()
+	snapshot, err := Export(want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestRecursiveStorage(t *testing.T) {
 
 func TestConcurrentOpen(t *testing.T) {
 	typ := sampleTypes()[0]
-	snapshot, err := Export()
+	snapshot, err := Export([]reflect.Type{typ})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestConcreteMethods(t *testing.T) {
 				t.Fatal(err)
 			}
 			reflect.SliceOf(typ)
-			snapshot, err := Export()
+			snapshot, err := Export([]reflect.Type{typ})
 			if err != nil {
 				t.Fatal(err)
 			}

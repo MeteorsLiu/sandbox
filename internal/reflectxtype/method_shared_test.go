@@ -51,7 +51,7 @@ func TestSharedMethodEntries(t *testing.T) {
 		reflect.SliceOf(typ)
 		originals = append(originals, typ)
 	}
-	snapshot, err := Export()
+	snapshot, err := Export(originals)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestSharedMethodEntries(t *testing.T) {
 			entries[method.Name] = current[j]
 		}
 	}
-	returned, err := table.Export()
+	returned, err := table.Export(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

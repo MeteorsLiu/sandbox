@@ -79,8 +79,10 @@ func concreteMethodSet(typ reflect.Type) ([]reflectx.Method, []reflect.Value, []
 				pkg = methodPackage(struct{ bytes *byte }{(*byte)(name)})
 			}
 			key := identity{method.Name, pkg}
-			if pointer {
-				interfaces[key] = methodText(rt, raw[i].ifn) != zeroMethod
+			// StructOf can promote methods onto T without adding them to *T,
+			// e.g. struct{ *bytes.Buffer }. Keep an entry from either side.
+			if methodText(rt, raw[i].ifn) != zeroMethod {
+				interfaces[key] = true
 			}
 			if pointer {
 				if index, ok := values[key]; ok {

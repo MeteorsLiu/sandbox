@@ -15,7 +15,6 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
-	"unsafe"
 
 	"github.com/goplus/reflectx"
 )
@@ -52,40 +51,29 @@ func (t *ReflectType) Resolve(id uint32) (reflect.Type, error) {
 // construction and Context.Reset calls before starting a transfer.
 var transferMu sync.Mutex
 
-// Export reads reflectx.Default's type caches and standard reflect caches.
-// A type created outside Default can be exposed with reflect.SliceOf(typ), as
-// state already does for reflecttype. Cache enumeration is not a whole-process
-// registry or an atomic snapshot of external constructor calls.
-func Export() (*Snapshot, error) {
-	return export(nil)
+// Export saves roots and their type dependencies, including complete method
+// sets. Unrelated cached types and their method environments are not exported.
+// An empty root list produces an empty snapshot.
+func Export(roots []reflect.Type) (*Snapshot, error) {
+	return export(nil, roots)
 }
 
-// Export preserves this import's type and method IDs and appends newly created
-// types. For example, a returned Node still has its original snapshot ID even
-// when the guest's reflect caches enumerate entries in a different order.
-func (t *ReflectType) Export() (*Snapshot, error) {
-	return export(t)
+// Export preserves this import's type and method IDs and appends roots and
+// their dependencies. For example, an Added type can refer to an imported
+// Node without renumbering Node or exporting unrelated guest-created types.
+func (t *ReflectType) Export(roots []reflect.Type) (*Snapshot, error) {
+	return export(t, roots)
 }
 
-func export(previous *ReflectType) (*Snapshot, error) {
+func export(previous *ReflectType, roots []reflect.Type) (*Snapshot, error) {
 	if runtime.Version() != "go1.26.6" {
 		return nil, fmt.Errorf("reflectxtype requires go1.26.6, got %s", runtime.Version())
 	}
 	transferMu.Lock()
 	defer transferMu.Unlock()
 
-	roots := cachedTypes()
-	// The leading three fields match reflectx v1.7.8 Context. Retain typed
-	// references, including both sides of the embedded-method lookup cache.
-	ctx := (*struct {
-		embed      map[reflect.Type]reflect.Type
-		structs    map[string][]reflect.Type
-		interfaces map[string]reflect.Type
-	})(unsafe.Pointer(reflectx.Default))
 	e := exporter{
 		ids:           make(map[reflect.Type]uint32),
-		needed:        make(map[reflect.Type]bool),
-		visiting:      make(map[reflect.Type]bool),
 		sharedMethods: make(map[methodEntries]int),
 	}
 	if previous != nil {
@@ -122,25 +110,12 @@ func export(previous *ReflectType) (*Snapshot, error) {
 			e.entries[i] = entry
 		}
 	}
-	for from, to := range ctx.embed {
-		roots = append(roots, from, to)
-		e.needed[from], e.needed[to] = true, true
-	}
-	for _, bucket := range ctx.structs {
-		for _, typ := range bucket {
-			roots = append(roots, typ)
-			e.needed[typ] = true
+	for i, typ := range roots {
+		if typ == nil {
+			return nil, fmt.Errorf("nil reflectx root type at index %d", i)
 		}
-	}
-	for _, typ := range ctx.interfaces {
-		roots = append(roots, typ)
-		e.needed[typ] = true
-	}
-	for _, typ := range roots {
-		if e.requiresReflectx(typ) {
-			if _, err := e.intern(typ); err != nil {
-				return nil, err
-			}
+		if _, err := e.intern(typ); err != nil {
+			return nil, err
 		}
 	}
 	data := binary.AppendUvarint(nil, uint64(len(e.entries)))
@@ -159,37 +134,9 @@ const concreteMethods = 1 << 9
 type exporter struct {
 	ids             map[reflect.Type]uint32
 	entries         [][]byte
-	needed          map[reflect.Type]bool
-	visiting        map[reflect.Type]bool
 	methods         []reflect.Value
 	retainedMethods map[reflect.Type][]method
 	sharedMethods   map[methodEntries]int
-}
-
-func (e *exporter) requiresReflectx(typ reflect.Type) bool {
-	if builtinTypes[typ.Kind()] == typ {
-		return false
-	}
-	if _, ok := staticTypes().byType[typ]; ok {
-		return false
-	}
-	if need, ok := e.needed[typ]; ok {
-		return need
-	}
-	if typ.Name() != "" || typ.Kind() == reflect.Interface || typ.Kind() == reflect.Struct || reflectx.NumMethodX(typ) != 0 || e.visiting[typ] {
-		e.needed[typ] = true
-		return true
-	}
-	e.visiting[typ] = true
-	need := false
-	for _, child := range appendDependencies(nil, typ) {
-		if e.requiresReflectx(child) {
-			need = true
-		}
-	}
-	delete(e.visiting, typ)
-	e.needed[typ] = need
-	return need
 }
 
 func (e *exporter) intern(typ reflect.Type) (uint32, error) {

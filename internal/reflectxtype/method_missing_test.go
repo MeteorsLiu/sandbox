@@ -38,6 +38,9 @@ func TestMissingMethodSignatures(t *testing.T) {
 	}
 
 	embedded := reflect.StructOf([]reflect.StructField{{Name: "Buffer", Type: pointer, Anonymous: true}})
+	if got := reflect.PointerTo(embedded).NumMethod(); got != 0 {
+		t.Fatalf("value-only method fixture has %d pointer methods", got)
+	}
 	raw = runtimeMethods((*[2]unsafe.Pointer)(unsafe.Pointer(&embedded))[1])
 	var missing int
 	for _, method := range raw {
@@ -54,7 +57,7 @@ func TestMissingMethodSignatures(t *testing.T) {
 	if missing != stripped {
 		t.Fatalf("StructOf nil signatures: got %d, want %d", missing, stripped)
 	}
-	methods, functions, _, entries := concreteMethodSet(embedded)
+	methods, functions, hasInterface, entries := concreteMethodSet(embedded)
 	if len(methods) != len(raw)-missing || len(functions) != len(methods) || len(entries) != len(methods) {
 		t.Fatalf("dynamic method tables: methods=%d functions=%d entries=%d, want %d", len(methods), len(functions), len(entries), len(raw)-missing)
 	}
@@ -65,6 +68,9 @@ func TestMissingMethodSignatures(t *testing.T) {
 		if method.Name == "String" {
 			receiver := reflect.New(embedded).Elem()
 			receiver.Field(0).Set(reflect.ValueOf(bytes.NewBufferString("retained method")))
+			if _, ok := receiver.Interface().(interface{ String() string }); !ok || !hasInterface[i] {
+				t.Fatal("value method lost its interface entry when the pointer type has no methods")
+			}
 			if got := functions[i].Call([]reflect.Value{receiver})[0].String(); got != "retained method" {
 				t.Fatalf("valid method returned %q", got)
 			}
