@@ -132,10 +132,11 @@ func armStoredClosurePC(code []byte, off int, start uint64) (uint64, bool) {
 }
 
 // Only known register effects are allowed on the allocation's fallthrough path.
-// Calls, branches, spills and unknown operations end the candidate. For example,
-// AND X3,X3,#mask can prepare a capture without changing X0 or a PC in X4.
+// Calls, branches and unknown operations end the candidate. Capture stores and
+// conditional selects may proceed if they preserve the object and PC registers.
 func armPreservesRegisters(inst arm64asm.Inst, pcReg arm64asm.Reg) bool {
 	var memory arm64asm.Arg
+	store := false
 	switch inst.Op {
 	case arm64asm.NOP, arm64asm.CMP, arm64asm.CMN, arm64asm.TST:
 		return true
@@ -143,7 +144,9 @@ func armPreservesRegisters(inst arm64asm.Inst, pcReg arm64asm.Reg) bool {
 		arm64asm.AND, arm64asm.ANDS, arm64asm.ORR, arm64asm.EOR,
 		arm64asm.LSL, arm64asm.LSR, arm64asm.ASR, arm64asm.NEG,
 		arm64asm.MOV, arm64asm.MOVK, arm64asm.MOVZ, arm64asm.MOVN,
-		arm64asm.ADR, arm64asm.ADRP:
+		arm64asm.ADR, arm64asm.ADRP,
+		arm64asm.CSEL, arm64asm.CSINC, arm64asm.CSINV, arm64asm.CSNEG,
+		arm64asm.CINC, arm64asm.CINV, arm64asm.CNEG, arm64asm.CSET, arm64asm.CSETM:
 	case arm64asm.LDR, arm64asm.LDRB, arm64asm.LDRH,
 		arm64asm.LDRSB, arm64asm.LDRSH, arm64asm.LDRSW, arm64asm.LDUR:
 		memory = inst.Args[1]
@@ -152,16 +155,20 @@ func armPreservesRegisters(inst arm64asm.Inst, pcReg arm64asm.Reg) bool {
 			return false
 		}
 		memory = inst.Args[2]
+	case arm64asm.STR:
+		memory, store = inst.Args[1], true
+	case arm64asm.STP:
+		memory, store = inst.Args[2], true
 	default:
 		return false
 	}
-	if !armPreservesRegister(inst.Args[0], pcReg) {
+	if !store && !armPreservesRegister(inst.Args[0], pcReg) {
 		return false
 	}
 	if memory != nil {
 		switch mem := memory.(type) {
 		case arm64asm.MemImmediate:
-			// Pre/post-indexed loads also write their base register.
+			// Pre/post-indexed loads and stores also write their base register.
 			return mem.Mode == arm64asm.AddrOffset || armPreservesRegister(mem.Base, pcReg)
 		case arm64asm.MemExtend:
 			return true
@@ -219,7 +226,11 @@ func x86PreservesRegisters(inst x86asm.Inst, pcReg x86asm.Reg) bool {
 		return true
 	case x86asm.MOV, x86asm.MOVZX, x86asm.MOVSX, x86asm.MOVSXD, x86asm.LEA,
 		x86asm.ADD, x86asm.ADC, x86asm.SUB, x86asm.SBB, x86asm.AND, x86asm.OR, x86asm.XOR,
-		x86asm.SHL, x86asm.SHR, x86asm.SAR, x86asm.NEG, x86asm.NOT, x86asm.INC, x86asm.DEC:
+		x86asm.SHL, x86asm.SHR, x86asm.SAR, x86asm.NEG, x86asm.NOT, x86asm.INC, x86asm.DEC,
+		x86asm.CMOVA, x86asm.CMOVAE, x86asm.CMOVB, x86asm.CMOVBE,
+		x86asm.CMOVE, x86asm.CMOVNE, x86asm.CMOVG, x86asm.CMOVGE,
+		x86asm.CMOVL, x86asm.CMOVLE, x86asm.CMOVO, x86asm.CMOVNO,
+		x86asm.CMOVS, x86asm.CMOVNS, x86asm.CMOVP, x86asm.CMOVNP:
 	case x86asm.IMUL:
 		// The one-operand form implicitly writes RAX and RDX.
 		if inst.Args[1] == nil {
@@ -230,7 +241,10 @@ func x86PreservesRegisters(inst x86asm.Inst, pcReg x86asm.Reg) bool {
 	}
 	reg, ok := inst.Args[0].(x86asm.Reg)
 	if !ok {
-		return false // Memory writes, including spills, are not followed.
+		// An ordinary MOV to memory reads its address registers without
+		// modifying them. Other memory operations remain unsupported.
+		_, memory := inst.Args[0].(x86asm.Mem)
+		return inst.Op == x86asm.MOV && memory
 	}
 	// Partial writes invalidate the tracked 64-bit value, including AH/CH.
 	switch {
