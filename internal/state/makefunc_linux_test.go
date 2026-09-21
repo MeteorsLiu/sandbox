@@ -104,7 +104,7 @@ func TestMakeFuncReinterpretedProcess(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if graph.saved.lastID != objectID(len(loaded.objectsByID)) {
+		if len(graph.saved.objectsByID) != len(loaded.objectsByID) {
 			t.Fatal("MakeFunc signature views acquired new object IDs")
 		}
 		if err := os.WriteFile(path, mem[:n], 0600); err != nil {

@@ -132,11 +132,11 @@ func TestRetainedMethodIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	callbacks := make([]func([]reflect.Value) []reflect.Value, guest.MethodCount())
-	def := guest.definitions[sent.IDs[typ]-1]
-	if len(def.methods) != len(order) {
-		t.Fatalf("got %d methods, want %d", len(def.methods), len(order))
+	retainedMethods := guest.methods[sent.IDs[typ]-1]
+	if len(retainedMethods) != len(order) {
+		t.Fatalf("got %d methods, want %d", len(retainedMethods), len(order))
 	}
-	for i, method := range def.methods {
+	for i, method := range retainedMethods {
 		if got := (identity{method.name, method.pkg}); got != order[i] {
 			t.Fatalf("source method %d: got %v, want %v", i, got, order[i])
 		}
@@ -160,7 +160,7 @@ func TestRetainedMethodIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	receiver := reflect.New(restored)
-	for i, method := range def.methods {
+	for i, method := range retainedMethods {
 		got := returned.Methods[method.function-1].Call([]reflect.Value{receiver})[0].Int()
 		if got != int64(i+22) {
 			t.Fatalf("method %s.%s ID %d returned %d, want %d", method.pkg, method.name, method.function, got, i+22)

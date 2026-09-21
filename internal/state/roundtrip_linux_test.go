@@ -44,7 +44,7 @@ func TestObjectIDClosureProcess(t *testing.T) {
 		}
 		guest.Native = nil
 		runtime.GC()
-		returned := loaded.encoder(ctx, make([]byte, 1<<20))
+		returned := loaded.loaded().encoder(ctx, make([]byte, 1<<20))
 		output := saveObjects(t, returned, &guest)
 		if returned.lastID != objectID(len(loaded.objectsByID)) {
 			t.Fatal("native or MakeFunc environments acquired new IDs")
@@ -77,7 +77,7 @@ func TestObjectIDClosureProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loadObjects(t, saved.decoder(ctx, output), &host)
+	loadObjects(t, saved.saved().decoder(ctx, output), &host)
 	runtime.GC()
 	if host.Native != nil || n != 15 || receiver.N != 23 || original() != 16 || host.Wrapped() != 18 || host.Alias() != 20 || fn() != 22 || host.Method(1) != 24 {
 		t.Fatalf("host captures did not preserve identity: n=%d receiver=%d", n, receiver.N)

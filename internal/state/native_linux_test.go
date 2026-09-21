@@ -147,10 +147,30 @@ func TestNativeUnreachableMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(graph.saved.pending) != 1 {
-		t.Fatalf("placeholder emitted %d objects, want only the function", len(graph.saved.pending))
+	if len(graph.saved.objectsByID) != 1 {
+		t.Fatalf("placeholder emitted %d objects, want only the function", len(graph.saved.objectsByID))
 	}
-	record, ok := graph.saved.pending[1].encoded.(*functionValue)
+	r := reader{mem: mem[:n]}
+	for range 2 {
+		length, objects, err := readHeader(&r)
+		if err != nil || objects {
+			t.Fatalf("type table header: objects=%t err=%v", objects, err)
+		}
+		r.readBytes(length)
+	}
+	count, objects, err := readHeader(&r)
+	if err != nil || !objects || count != 1 {
+		t.Fatalf("object header: count=%d objects=%t err=%v", count, objects, err)
+	}
+	id, err := r.get()
+	if err != nil || id != uintValue(1) {
+		t.Fatalf("root ID: %v, %v", id, err)
+	}
+	encoded, err := r.get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok := encoded.(*functionValue)
 	if !ok || record.PC != uintValue(pc) || record.Env.Root != 0 {
 		t.Fatalf("placeholder record: %#v", record)
 	}

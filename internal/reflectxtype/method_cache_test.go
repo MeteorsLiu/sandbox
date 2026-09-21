@@ -92,7 +92,7 @@ func TestMethodCacheIdentity(t *testing.T) {
 			var ids [2]int
 			callbacks := make([]func([]reflect.Value) []reflect.Value, guest.MethodCount())
 			for i, typ := range originals {
-				methods := guest.definitions[sent.IDs[typ]-1].methods
+				methods := guest.methods[sent.IDs[typ]-1]
 				if len(methods) != 1 || methods[0].name != "Read" {
 					t.Fatalf("%v lost its Read declaration: %v", typ, methods)
 				}
@@ -161,7 +161,7 @@ func TestMethodCacheIdentity(t *testing.T) {
 			}
 			for i, typ := range originals {
 				id := sent.IDs[typ]
-				if returned.IDs[restored[i]] != id || host.definitions[id-1].methods[0].function != ids[i] {
+				if returned.IDs[restored[i]] != id || host.methods[id-1][0].function != ids[i] {
 					t.Fatalf("%v changed its TypeID or MethodID on return", typ)
 				}
 				if got, err := host.Resolve(id); err != nil || got != typ {

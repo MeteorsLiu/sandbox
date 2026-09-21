@@ -66,7 +66,7 @@ func TestSharedMethodEntries(t *testing.T) {
 	shared := make(map[string]int)
 	locals := make(map[int]bool)
 	for _, typ := range originals {
-		for _, method := range table.definitions[snapshot.IDs[typ]-1].methods {
+		for _, method := range table.methods[snapshot.IDs[typ]-1] {
 			switch method.name {
 			case "Local":
 				if locals[method.function] {

@@ -70,8 +70,8 @@ func TestReflectxMethodRoots(t *testing.T) {
 			if referenced {
 				wantMethods, wantNumber, wantForeign = 2, 32, 21
 			}
-			if len(snapshot.Methods) != wantMethods {
-				t.Fatalf("method count: got %d, want %d", len(snapshot.Methods), wantMethods)
+			if methods := readMethodRecords(t, mem[:n]); len(methods) != wantMethods {
+				t.Fatalf("method count: got %d, want %d", len(methods), wantMethods)
 			}
 			var dst root
 			if _, err := guest.Load(ctx, mem[:n], &dst); err != nil {

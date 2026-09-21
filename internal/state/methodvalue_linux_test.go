@@ -143,12 +143,12 @@ func TestReflectMethodValueRoundTrip(t *testing.T) {
 	if got := guest[0].(func(int) int)(2); got != 12 || r.N != 10 {
 		t.Fatal("guest method did not retain an independent receiver")
 	}
-	returned := loaded.encoder(ctx, make([]byte, 1<<20))
+	returned := loaded.loaded().encoder(ctx, make([]byte, 1<<20))
 	output := saveObjects(t, returned, &guest)
 	if returned.lastID != saved.lastID {
 		t.Fatal("rebuilt method environment acquired a new object ID")
 	}
-	loadObjects(t, saved.decoder(ctx, output), &host)
+	loadObjects(t, saved.saved().decoder(ctx, output), &host)
 	runtime.GC()
 	if host[3].(*nativeMethodReceiver) != r || r.N != 12 || fn(1) != 13 ||
 		host[1].(func(int) int)(2) != 15 || host[2].(reflect.Value).Call([]reflect.Value{reflect.ValueOf(3)})[0].Int() != 18 {

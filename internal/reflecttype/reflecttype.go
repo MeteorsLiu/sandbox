@@ -33,7 +33,7 @@ func Export() (*Snapshot, error) {
 	if runtime.Version() != "go1.26.6" {
 		return nil, fmt.Errorf("reflecttype requires go1.26.6, got %s", runtime.Version())
 	}
-	e := exporter{ids: make(map[reflect.Type]uint32), supported: make(map[reflect.Type]bool)}
+	e := exporter{ids: make(map[reflect.Type]uint32), supported: make(map[reflect.Type]bool), static: indexStaticTypes().byType}
 	for _, typ := range cachedTypes() {
 		if !e.supports(typ) {
 			continue
@@ -71,13 +71,14 @@ type exporter struct {
 	ids       map[reflect.Type]uint32
 	entries   [][]byte
 	supported map[reflect.Type]bool
+	static    map[reflect.Type]staticLocation
 }
 
 func (e *exporter) supports(typ reflect.Type) (supported bool) {
 	if builtinTypes[typ.Kind()] == typ {
 		return true
 	}
-	if _, ok := staticTypes().byType[typ]; ok {
+	if _, ok := e.static[typ]; ok {
 		return true
 	}
 	if supported, ok := e.supported[typ]; ok {
@@ -157,7 +158,7 @@ func (e *exporter) encode(typ reflect.Type) ([]byte, error) {
 	if builtinTypes[kind] == typ {
 		return binary.AppendUvarint(nil, uint64(kind)), nil
 	}
-	if location, ok := staticTypes().byType[typ]; ok {
+	if location, ok := e.static[typ]; ok {
 		// A static entry is restored by location, but callers can also refer
 		// to its dependencies directly (e.g. reflect.Type inside []reflect.Type).
 		for _, dependency := range appendDependencies(nil, typ) {

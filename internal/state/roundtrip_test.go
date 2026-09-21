@@ -57,12 +57,12 @@ func TestObjectIDRoundTrip(t *testing.T) {
 	guest.Slice = append(guest.Slice, 4)
 	guest.Value.SetInt(12)
 	runtime.GC()
-	returned := loaded.encoder(ctx, make([]byte, 1<<20))
+	returned := loaded.loaded().encoder(ctx, make([]byte, 1<<20))
 	output := saveObjects(t, returned, &guest)
 	if returned.lastID <= objectID(len(loaded.objectsByID)) {
 		t.Fatal("new objects did not receive new IDs")
 	}
-	loadObjects(t, saved.decoder(ctx, output), &host)
+	loadObjects(t, saved.saved().decoder(ctx, output), &host)
 	if host.A != b || host.B != a || a.Value != 12 || b.Value != 20 || a.Next != b || b.Next != a {
 		t.Fatal("pointer swap, original identity or cycle was lost")
 	}
@@ -94,19 +94,19 @@ func TestObjectIDRepeatedRoundTrip(t *testing.T) {
 	loadObjects(t, loaded, &guest)
 	for i := int64(11); i < 15; i++ {
 		guest[0].Value = i
-		returned := loaded.encoder(ctx, make([]byte, 1<<20))
+		returned := loaded.loaded().encoder(ctx, make([]byte, 1<<20))
 		output := saveObjects(t, returned, &guest)
 		if returned.lastID != saved.lastID {
 			t.Fatal("unchanged graph acquired new IDs")
 		}
-		restored := saved.decoder(ctx, output)
+		restored := saved.saved().decoder(ctx, output)
 		loadObjects(t, restored, &host)
 		if host[0] != n || host[1] != n || n.Value != i {
 			t.Fatal("original object was replaced")
 		}
-		saved = restored.encoder(ctx, make([]byte, 1<<20))
+		saved = restored.loaded().encoder(ctx, make([]byte, 1<<20))
 		input = saveObjects(t, saved, &host)
-		loaded = returned.decoder(ctx, input)
+		loaded = returned.saved().decoder(ctx, input)
 		loadObjects(t, loaded, &guest)
 	}
 }
@@ -126,7 +126,7 @@ func TestObjectIDMergedStorage(t *testing.T) {
 	*guest[0].(*int64) = 11
 	*guest[1].(**graphNode) = guest[3].(*graphNode)
 	guest[4] = &graphNode{Value: 30, Next: guest[2].(*graphNode)}
-	returned := loaded.encoder(ctx, make([]byte, 1<<20))
+	returned := loaded.loaded().encoder(ctx, make([]byte, 1<<20))
 	output := saveObjects(t, returned, &guest)
 	for id := range saved.pending {
 		if returned.pending[id] == nil {
@@ -136,7 +136,7 @@ func TestObjectIDMergedStorage(t *testing.T) {
 	if returned.lastID != saved.lastID+1 {
 		t.Fatal("new object reused an old ID")
 	}
-	loadObjects(t, saved.decoder(ctx, output), &host)
+	loadObjects(t, saved.saved().decoder(ctx, output), &host)
 	if host[0] != &n.Value || host[1] != &n.Next || host[2] != n || host[3] != other || n.Value != 11 || n.Next != other || host[4].(*graphNode).Next != n {
 		t.Fatal("merged fields or parent lost their identity")
 	}
@@ -151,12 +151,12 @@ func TestObjectIDRetainedStorage(t *testing.T) {
 	ctx := context.Background()
 	saved := newEncodeState(ctx, make([]byte, 1<<20))
 	input := saveObjects(t, saved, &host)
-	restored := saved.decoder(ctx, input)
+	restored := saved.saved().decoder(ctx, input)
 	loadObjects(t, restored, &host)
 	// A later save must not repurpose the field's existing ID for its
 	// previously unseen parent. The other process allocated only an int.
 	host.Whole = &array
-	next := restored.encoder(ctx, make([]byte, 1<<20))
+	next := restored.loaded().encoder(ctx, make([]byte, 1<<20))
 	err := safely(func() { next.Save(reflect.ValueOf(&host).Elem()) })
 	if err == nil || !strings.Contains(err.Error(), "cannot change retained storage") {
 		t.Fatalf("retained object ID was repurposed: %v", err)
@@ -209,9 +209,9 @@ func TestObjectIDChannelSnapshot(t *testing.T) {
 	guestChannel <- value
 	guestChannel <- value
 	close(guestChannel)
-	returned := loaded.encoder(ctx, make([]byte, 1<<20))
+	returned := loaded.loaded().encoder(ctx, make([]byte, 1<<20))
 	output := saveObjects(t, returned, guest.Interface())
-	loadObjects(t, saved.decoder(ctx, output), &host)
+	loadObjects(t, saved.saved().decoder(ctx, output), &host)
 	if host.Channel == ch || host.Alias != host.Channel || len(ch) != 1 || len(host.Channel) != 2 || n.Value != 2 {
 		t.Fatal("channel snapshot modified the original queue or lost aliases")
 	}

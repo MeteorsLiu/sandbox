@@ -5,7 +5,6 @@ package reflectxtype
 
 import (
 	"reflect"
-	"sync"
 	"unsafe"
 )
 
@@ -18,8 +17,6 @@ type staticTypeIndex struct {
 	byType     map[reflect.Type]staticLocation
 	byLocation map[staticLocation]reflect.Type
 }
-
-var staticTypes = sync.OnceValue(indexStaticTypes)
 
 //go:linkname reflectTypeLinks reflect.typelinks
 func reflectTypeLinks() ([]unsafe.Pointer, [][]int32)

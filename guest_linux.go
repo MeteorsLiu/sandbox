@@ -48,7 +48,5 @@ func runGuest() (err error) {
 	if err != nil {
 		return err
 	}
-	runtime.GC()
-	runtime.KeepAlive(&graph)
 	return nil
 }

@@ -67,7 +67,7 @@ func TestSubsliceRoundTrip(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if guestState.saved.lastID != hostState.saved.lastID {
+				if len(guestState.saved.objectsByID) != len(hostState.saved.objectsByID) {
 					t.Fatal("subarray views allocated new object IDs on return")
 				}
 				if _, err := hostState.Load(ctx, mem[:n], &host); err != nil {

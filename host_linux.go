@@ -112,7 +112,6 @@ func (s *Sandbox) Run(fn func()) (err error) {
 		return fmt.Errorf("sandbox export: %w", err)
 	}
 	runtime.GC()
-	defer runtime.KeepAlive(&graph)
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -168,6 +167,7 @@ func (s *Sandbox) Run(fn func()) (err error) {
 	if _, err := graph.Load(ctx, data, &fn); err != nil {
 		return fmt.Errorf("sandbox import: %w", err)
 	}
+	graph = state.State{}
 	runtime.GC()
 	return nil
 }

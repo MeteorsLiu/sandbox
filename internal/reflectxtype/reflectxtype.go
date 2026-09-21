@@ -32,7 +32,7 @@ type Snapshot struct {
 type ReflectType struct {
 	types       []reflect.Type
 	entries     [][]byte
-	definitions []definition
+	methods     [][]method
 	ctx         *reflectx.Context
 	methodCount int
 	retained    int
@@ -75,6 +75,7 @@ func export(previous *ReflectType, roots []reflect.Type) (*Snapshot, error) {
 	e := exporter{
 		ids:           make(map[reflect.Type]uint32),
 		sharedMethods: make(map[methodEntries]int),
+		static:        indexStaticTypes().byType,
 	}
 	if previous != nil {
 		e.entries = make([][]byte, len(previous.types))
@@ -82,15 +83,15 @@ func export(previous *ReflectType, roots []reflect.Type) (*Snapshot, error) {
 		e.retainedMethods = make(map[reflect.Type][]method)
 		for i, typ := range previous.types {
 			e.ids[typ] = uint32(i + 1)
-			def := previous.definitions[i]
-			if def.kind != reflect.Interface && len(def.methods) != 0 {
-				e.retainedMethods[typ] = def.methods
+			retained := previous.methods[i]
+			if len(retained) != 0 {
+				e.retainedMethods[typ] = retained
 				methods, _, _, entries := concreteMethodSet(typ)
 				indices := make(map[methodIdentity]int, len(methods))
 				for j, method := range methods {
 					indices[methodIdentity{method.Name, method.PkgPath, method.Pointer}] = j
 				}
-				for _, method := range def.methods {
+				for _, method := range retained {
 					index, ok := indices[methodIdentity{method.name, method.pkg, method.pointer}]
 					if !ok {
 						return nil, fmt.Errorf("retained method %s.%s changed for %v", method.pkg, method.name, typ)
@@ -137,6 +138,7 @@ type exporter struct {
 	methods         []reflect.Value
 	retainedMethods map[reflect.Type][]method
 	sharedMethods   map[methodEntries]int
+	static          map[reflect.Type]staticLocation
 }
 
 func (e *exporter) intern(typ reflect.Type) (uint32, error) {
@@ -162,7 +164,7 @@ func (e *exporter) encode(typ reflect.Type) ([]byte, error) {
 	if builtinTypes[kind] == typ {
 		return binary.AppendUvarint(nil, uint64(kind)), nil
 	}
-	if location, ok := staticTypes().byType[typ]; ok {
+	if location, ok := e.static[typ]; ok {
 		data := binary.AppendUvarint(nil, 0)
 		data = binary.AppendUvarint(data, uint64(location.module))
 		return binary.AppendUvarint(data, location.offset), nil

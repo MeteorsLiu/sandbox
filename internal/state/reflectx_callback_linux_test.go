@@ -88,11 +88,14 @@ func TestReflectxSharedCallbackRoots(t *testing.T) {
 				if snapshot.IDs[types[0]] != 0 || snapshot.IDs[types[1]] == 0 || snapshot.IDs[types[2]] == 0 {
 					t.Fatal("shared method imported its historical receiver type")
 				}
-				if len(snapshot.Methods) != 4 {
-					t.Fatalf("method implementations: got %d, want 4", len(snapshot.Methods))
+				if methods := readMethodRecords(t, mem[:n]); len(methods) != 4 {
+					t.Fatalf("method implementations: got %d, want 4", len(methods))
 				}
-				for _, object := range host.saved.pending {
-					if object.obj.Type() == reflect.TypeFor[int]() && object.obj.Addr().Interface().(*int) == counters[0] {
+				if snapshot.Methods != nil {
+					t.Fatal("save retained exported method functions")
+				}
+				for _, object := range host.saved.objectsByID {
+					if object.obj.IsValid() && object.obj.Type() == reflect.TypeFor[int]() && object.obj.Addr().Interface().(*int) == counters[0] {
 						t.Fatal("historical receiver's Own capture entered the graph")
 					}
 				}
@@ -135,7 +138,7 @@ func TestReflectxSharedCallbackRoots(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(guest.saved.reflectxSnapshot.Methods) != 4 {
+				if len(readMethodRecords(t, mem[:n])) != 4 {
 					t.Fatal("return added method implementations")
 				}
 				if _, err := host.Load(context.Background(), mem[:n], &src); err != nil {

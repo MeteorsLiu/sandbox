@@ -38,7 +38,7 @@ func TestStructTypeIsolation(t *testing.T) {
 			if embeddedFirst {
 				roots[0], roots[4] = roots[4], roots[0]
 			}
-			e := exporter{ids: make(map[reflect.Type]uint32)}
+			e := exporter{ids: make(map[reflect.Type]uint32), static: indexStaticTypes().byType}
 			for _, typ := range roots {
 				if _, err := e.intern(typ); err != nil {
 					t.Fatal(err)

@@ -257,7 +257,7 @@ func TestReflectxNativeMethodProcess(t *testing.T) {
 	}
 }
 
-func checkOriginalMethodRecords(t *testing.T, es *encodeState, data []byte) {
+func readMethodRecords(t *testing.T, data []byte) multipleObjects {
 	t.Helper()
 	r := reader{mem: data}
 	for range 2 {
@@ -275,8 +275,14 @@ func checkOriginalMethodRecords(t *testing.T, es *encodeState, data []byte) {
 	if !ok {
 		t.Fatalf("method table is %T", encoded)
 	}
+	return *methods
+}
+
+func checkOriginalMethodRecords(t *testing.T, saved *savedState, data []byte) {
+	t.Helper()
+	methods := readMethodRecords(t, data)
 	var native, dynamic int
-	for _, record := range *methods {
+	for _, record := range methods {
 		switch value := record.(type) {
 		case *functionValue:
 			dynamic++
@@ -304,10 +310,13 @@ func checkOriginalMethodRecords(t *testing.T, es *encodeState, data []byte) {
 	}
 	callPC := reflect.ValueOf(reflect.Value{}.Call).Pointer()
 	callSlicePC := reflect.ValueOf(reflect.Value{}.CallSlice).Pointer()
-	for _, obj := range es.pending {
-		pc := es.native.storage[obj.obj.Type()]
+	for i, obj := range saved.objectsByID {
+		if !obj.obj.IsValid() {
+			continue
+		}
+		pc := saved.native.storage[obj.obj.Type()]
 		if pc == reflectxMethodCallPC || pc == callPC || pc == callSlicePC {
-			t.Fatalf("local method adapter entered the object graph: ID %d", obj.id)
+			t.Fatalf("local method adapter entered the object graph: ID %d", i+1)
 		}
 	}
 }
