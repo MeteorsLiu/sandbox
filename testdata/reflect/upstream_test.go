@@ -106,7 +106,7 @@ func TestStandardReflect(t *testing.T) {
 		t.Fatal(err)
 	}
 	binary := filepath.Join(dir, "reflect.test")
-	cmd = exec.Command("go", "test", "-mod=readonly", "-overlay="+overlayPath,
+	cmd = exec.Command("go", "test", "-vet=off", "-mod=readonly", "-overlay="+overlayPath,
 		"-ldflags=-checklinkname=0 -s=false -w=false", "-c", "-o", binary, "reflect")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build upstream reflect: %v\n%s", err, output)
