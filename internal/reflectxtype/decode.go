@@ -53,6 +53,7 @@ func open(data []byte, previous *Snapshot) (result *ReflectType, err error) {
 		mocks:       make([]reflect.Type, n),
 		mocking:     make([]bool, n),
 		ctx:         reflectx.NewContext(),
+		static:      indexStaticTypes().byLocation,
 	}
 	entries := make([][]byte, n)
 	for i := range d.definitions {
@@ -132,7 +133,15 @@ func open(data []byte, previous *Snapshot) (result *ReflectType, err error) {
 	for i := range d.definitions {
 		d.resolve(uint32(i + 1))
 	}
-	return &ReflectType{types: d.types, entries: entries, definitions: d.definitions, ctx: d.ctx, methodCount: d.methodCount, retained: retained}, nil
+	// Type construction is complete. Only concrete method definitions are
+	// needed for installation and for preserving IDs on the return export.
+	methods := make([][]method, n)
+	for i, def := range d.definitions {
+		if def.kind != reflect.Interface {
+			methods[i] = def.methods
+		}
+	}
+	return &ReflectType{types: d.types, entries: entries, methods: methods, ctx: d.ctx, methodCount: d.methodCount, retained: retained}, nil
 }
 
 type definition struct {
@@ -172,6 +181,7 @@ type importer struct {
 	mocking         []bool
 	ctx             *reflectx.Context
 	methodCount     int
+	static          map[staticLocation]reflect.Type
 }
 
 func (d *importer) parse(index int, r *typeReader) {
@@ -181,7 +191,7 @@ func (d *importer) parse(index int, r *typeReader) {
 		if module > math.MaxUint32 {
 			panic(fmt.Errorf("invalid static type module %d", module))
 		}
-		d.types[index] = staticTypes().byLocation[staticLocation{uint32(module), offset}]
+		d.types[index] = d.static[staticLocation{uint32(module), offset}]
 		if d.types[index] == nil {
 			panic(fmt.Errorf("unavailable static type module=%d offset=%#x", module, offset))
 		}

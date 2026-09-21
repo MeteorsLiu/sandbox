@@ -19,8 +19,6 @@ type staticTypeIndex struct {
 	byLocation map[staticLocation]reflect.Type
 }
 
-var staticTypes = sync.OnceValue(indexStaticTypes)
-
 //go:linkname reflectTypeLinks reflect.typelinks
 func reflectTypeLinks() ([]unsafe.Pointer, [][]int32)
 

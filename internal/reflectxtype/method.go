@@ -133,12 +133,12 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 		}
 	}()
 	installed := make(map[int]methodEntries)
-	for i, def := range t.definitions {
-		if def.kind == reflect.Interface || len(def.methods) == 0 {
+	for i, definitions := range t.methods {
+		if len(definitions) == 0 {
 			continue
 		}
-		ids := make(map[methodIdentity]int, len(def.methods))
-		for _, method := range def.methods {
+		ids := make(map[methodIdentity]int, len(definitions))
+		for _, method := range definitions {
 			ids[methodIdentity{method.name, method.pkg, method.pointer}] = method.function
 		}
 		if i < t.retained {
@@ -149,9 +149,9 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 			}
 			continue
 		}
-		methods := make([]reflectx.Method, len(def.methods))
+		methods := make([]reflectx.Method, len(definitions))
 		t.ctx.SetHasImethod(func(_ reflect.Type, m reflectx.Method) bool {
-			for _, method := range def.methods {
+			for _, method := range definitions {
 				if method.name == m.Name && method.pkg == m.PkgPath {
 					_, shared := installed[method.function]
 					return method.hasInterface && !shared
@@ -159,7 +159,7 @@ func (t *ReflectType) SetMethods(callbacks []func([]reflect.Value) []reflect.Val
 			}
 			return false
 		})
-		for j, method := range def.methods {
+		for j, method := range definitions {
 			methods[j] = reflectx.Method{Name: method.name, PkgPath: method.pkg, Pointer: method.pointer, Type: t.types[method.typ-1], Func: callbacks[method.function-1]}
 		}
 		if err := t.ctx.SetMethodSet(t.types[i], methods, false); err != nil {

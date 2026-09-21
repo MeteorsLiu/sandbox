@@ -36,6 +36,7 @@ func Open(data []byte) (result *ReflectType, err error) {
 		entries:   make([][]byte, n),
 		types:     make([]reflect.Type, n),
 		resolving: make([]bool, n),
+		static:    indexStaticTypes().byLocation,
 	}
 	for i := range d.entries {
 		length := r.count()
@@ -55,6 +56,7 @@ type importer struct {
 	entries   [][]byte
 	types     []reflect.Type
 	resolving []bool
+	static    map[staticLocation]reflect.Type
 }
 
 func (d *importer) resolve(id uint64) reflect.Type {
@@ -82,7 +84,7 @@ func (d *importer) resolve(id uint64) reflect.Type {
 			if module > math.MaxUint32 {
 				panic(fmt.Errorf("invalid static type module %d", module))
 			}
-			typ = staticTypes().byLocation[staticLocation{uint32(module), offset}]
+			typ = d.static[staticLocation{uint32(module), offset}]
 			if typ == nil {
 				panic(fmt.Errorf("static type module=%d offset=%#x is unavailable", module, offset))
 			}

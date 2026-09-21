@@ -35,9 +35,9 @@ func TestSyncPoolNewRoundTrip(t *testing.T) {
 	}
 	guest.Pool.Put("guest cache")
 	host.Pool.Put("old destination cache")
-	returned := loaded.encoder(ctx, make([]byte, 1<<20))
+	returned := loaded.loaded().encoder(ctx, make([]byte, 1<<20))
 	output := saveObjects(t, returned, &guest)
-	loadObjects(t, saved.decoder(ctx, output), host)
+	loadObjects(t, saved.saved().decoder(ctx, output), host)
 	if host.Alias != &host.Pool || host.Pool.New == nil || host.Calls != 1 {
 		t.Fatal("returned Pool lost its alias, New or captured mutation")
 	}
