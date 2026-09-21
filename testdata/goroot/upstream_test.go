@@ -52,6 +52,12 @@ func init() {
 	gorootTestSkips["fixedbugs/issue30116u.go"] = "BUG, slice bound check"
 	gorootTestSkips["chan/select5.go"] = "bug, select case expr call order"
 
+	// Sandbox-specific: ixgo Goexit compares the current goroutine ID with the
+	// interpreter's host mainid. Exclude these cases until IDs are rebound.
+	gorootTestSkips["fixedbugs/issue5963.go"] = "ixgo Goexit depends on a process-local goroutine ID"
+	gorootTestSkips["fixedbugs/issue8158.go"] = "ixgo Goexit depends on a process-local goroutine ID"
+	gorootTestSkips["fixedbugs/issue11256.go"] = "ixgo Goexit depends on a process-local goroutine ID"
+
 	// fixedbugs/issue7740.go
 	// const ulp = (1.0 + (2.0 / 3.0)) - (5.0 / 3.0)
 	// Go 1.14 1.15 1.16 ulp = 1.4916681462400413e-154

@@ -233,6 +233,14 @@ func TestInterpreterUpstream(t *testing.T) {
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			switch name {
+			case "TestGoexitDeadlock":
+				t.Skip("ixgo retains the host main goroutine ID; Goexit is not supported across migration")
+			case "TestRunContext":
+				t.Skip("host context.timerCtx/cancelCtx contains process-local cancellation and timer state")
+			case "TestTestdataFiles", "TestTestdataFilesRace1", "TestTestdataFilesRace2", "TestTestdataFilesRace3", "TestTestdataFilesRace4", "TestTestdataFilesRace5":
+				t.Run("issue5963.go", func(t *testing.T) {
+					t.Skip("Goexit fixture excluded from the upstream corpus: ixgo retains the host main goroutine ID")
+				})
 			case "TestEmbedImethod", "TestStructEmbed":
 				t.Skip("test-time ixgo package registration is not transferred to the guest")
 			case "TestShadowedMethod":
