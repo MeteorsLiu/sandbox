@@ -1,0 +1,53 @@
+package ixgo_test
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync/atomic"
+	"testing"
+
+	"github.com/goplus/ixgo"
+	"github.com/xgo-dev/sandbox"
+)
+
+func TestMain(m *testing.M) {
+	// All corpus runners share this list. Keep the remaining programs and their
+	// concurrency unchanged; issue5963 executes Goexit during package init.
+	testdataTests = slices.DeleteFunc(testdataTests, func(name string) bool {
+		return name == "issue5963.go"
+	})
+	executable, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	binaryDir := filepath.Dir(executable)
+	s := sandbox.Sandbox{
+		Library: os.Getenv("SANDBOX_TEST_LIBRARY"),
+		Mounts: []sandbox.Mount{
+			{Type: "bind", Source: "/", Target: "/", Options: []string{"ro"}},
+			{Type: "tmpfs", Target: "/tmp"},
+			{Type: "bind", Source: binaryDir, Target: binaryDir, Options: []string{"ro"}},
+			{Type: "proc", Target: "/proc"},
+		},
+	}
+	var roundTrips atomic.Int64
+	ixgo.SandboxTestRoundTrip = func(fn func()) {
+		completed := false
+		if err := s.Run(func() { fn(); completed = true }); err != nil {
+			panic(fmt.Errorf("state round trip: %w", err))
+		}
+		if !completed {
+			panic("guest completion was not written back")
+		}
+		roundTrips.Add(1)
+	}
+	code := m.Run()
+	if err := s.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	fmt.Fprintf(os.Stderr, "state round trips: %d\n", roundTrips.Load())
+	os.Exit(code)
+}

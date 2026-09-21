@@ -67,7 +67,7 @@ jobs:
   integration:
     name: Sentry integration / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +112,8 @@ jobs:
           bash sentry/build-linux.sh "$TEST_BIN"
           cd testdata
           go test -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -c -o "$TEST_BIN/ixgo.test" ./ixgo
+          go test -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -c -o "$TEST_BIN/ixgo-upstream.test" ./ixgo/upstream
+          go test -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -c -o "$TEST_BIN/reflect.test" ./reflect
           go build -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -o "$TEST_BIN/smoke" .
           cd llar
           go test -mod=readonly -ldflags='-checklinkname=0 -s=false -w=false' -c -o "$TEST_BIN/llar.test" .
@@ -119,6 +121,22 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: testdata/ixgo
         run: sudo env GLIBC_TUNABLES="$GLIBC_TUNABLES" SANDBOX_TEST_LIBRARY="$SANDBOX_TEST_LIBRARY" "$TEST_BIN/ixgo.test" -test.v -test.timeout=10m
+      - name: Test Go reflect in Sentry
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: testdata
+        run: |
+          sudo env GLIBC_TUNABLES="$GLIBC_TUNABLES" SANDBOX_TEST_LIBRARY="$SANDBOX_TEST_LIBRARY" \
+            PATH="$PATH" GOTOOLCHAIN="$GOTOOLCHAIN" GOROOT="$(go env GOROOT)" \
+            GOPATH="$(go env GOPATH)" GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" \
+            TMPDIR=/tmp "$TEST_BIN/reflect.test" -test.v -test.timeout=20m
+      - name: Test upstream ixgo interpreter state round trips
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: testdata
+        run: |
+          sudo env GLIBC_TUNABLES="$GLIBC_TUNABLES" SANDBOX_TEST_LIBRARY="$SANDBOX_TEST_LIBRARY" \
+            PATH="$PATH" GOTOOLCHAIN="$GOTOOLCHAIN" GOROOT="$(go env GOROOT)" \
+            GOPATH="$(go env GOPATH)" GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" \
+            TMPDIR=/tmp "$TEST_BIN/ixgo-upstream.test" -test.v -test.timeout=40m
       - name: Test LLAR formulas
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: testdata/llar
