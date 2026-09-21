@@ -4,7 +4,12 @@ import (
 	"context"
 	"io"
 	"reflect"
+	"sync"
 )
+
+// Separate States can retain the same host objects. Serialize their restores,
+// including validation and hooks, so two Loads cannot write the same map.
+var loadMu sync.Mutex
 
 // State retains object identities across alternating Save and Load calls.
 // The zero value is ready for use. Each participant owns its own State and
@@ -48,6 +53,9 @@ func (s *State) save(ctx context.Context, mem []byte, out io.Writer, rootPtr any
 // and confined to their decoded graph. Their external side effects cannot be
 // rolled back, and a hook that fails only during writeback can partially apply.
 func (s *State) Load(ctx context.Context, mem []byte, rootPtr any) (Stats, error) {
+	loadMu.Lock()
+	defer loadMu.Unlock()
+
 	ds := newDecodeState(ctx, mem)
 	err := safely(func() {
 		if s.saved != nil {
