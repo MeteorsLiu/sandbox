@@ -825,22 +825,27 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		if err != nil {
 			Failf("method functions: %w", err)
 		}
-		methods, ok := encoded.(*arrayValue)
-		if !ok || len(methods.Contents) != ds.reflectx.MethodCount() {
+		methods, ok := encoded.(*multipleObjects)
+		if !ok || len(*methods) != ds.reflectx.MethodCount() {
 			Failf("method function count does not match type table")
 		}
-		callbacks := make([]func([]reflect.Value) []reflect.Value, len(methods.Contents))
-		for i, record := range methods.Contents {
-			fn, ok := record.(*reflectedValue)
-			if !ok {
+		callbacks := make([]func([]reflect.Value) []reflect.Value, len(*methods))
+		for i, record := range *methods {
+			switch fn := record.(type) {
+			case *functionValue:
+				// Publish the callback's closure storage now, before its captured
+				// objects are decoded. SetMethods rebuilds the receiver wrapper.
+				ds.decodeFunction(reflect.ValueOf(&callbacks[i]).Elem(), fn)
+			case *reflectedValue:
+				var function reflect.Value
+				ds.decodeObject(nil, reflect.ValueOf(&function).Elem(), fn)
+				if !function.IsValid() || function.Kind() != reflect.Func || function.IsNil() {
+					Failf("invalid restored method function")
+				}
+				callbacks[i] = reflectxMethod{function: function}.call
+			default:
 				Failf("invalid method function %T", record)
 			}
-			var function reflect.Value
-			ds.decodeObject(nil, reflect.ValueOf(&function).Elem(), fn)
-			if !function.IsValid() || function.Kind() != reflect.Func || function.IsNil() {
-				Failf("invalid restored method function")
-			}
-			callbacks[i] = reflectxMethod{function: function}.call
 		}
 		// Allocate closure storage first, install the method table, then fill
 		// the environments. Interfaces decoded below see the final Ifn entries.

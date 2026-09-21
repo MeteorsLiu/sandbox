@@ -906,7 +906,7 @@ func (es *encodeState) Save(obj reflect.Value) {
 	var oes *objectEncodeState
 	var snapshot *reflecttype.Snapshot
 	var extended *reflectxtype.Snapshot
-	var methods arrayValue
+	var methods multipleObjects
 	if err := safely(func() {
 		for {
 			for oes = es.deferred.Front(); oes != nil; oes = es.deferred.Front() {
@@ -945,10 +945,16 @@ func (es *encodeState) Save(obj reflect.Value) {
 			if err != nil {
 				Failf("export reflectx types: %w", err)
 			}
-			methods.Contents = make([]object, len(extended.Methods))
+			methods = make(multipleObjects, len(extended.Methods))
 			for i, fn := range extended.Methods {
 				fn = es.native.originalFunction(fn)
-				es.encodeObject(reflect.ValueOf(fn), encodeAsValue, &methods.Contents[i])
+				if impl := makeFuncStorage(fn); impl != nil {
+					// A shared Tfn may still carry an earlier receiver type. The
+					// type table owns the signature; only the callback is state.
+					es.encodeFunction(reflect.ValueOf(impl.fn), &methods[i])
+				} else {
+					es.encodeObject(reflect.ValueOf(fn), encodeAsValue, &methods[i])
+				}
 			}
 			// Method signatures and environments can expose more types. Finish
 			// both before assigning the final type IDs for the entire graph.
@@ -998,7 +1004,7 @@ func (es *encodeState) Save(obj reflect.Value) {
 		Failf("error writing reflectx type table header: %w", err)
 	}
 	es.w.writeBytes(reflectxData)
-	if len(methods.Contents) != 0 {
+	if len(methods) != 0 {
 		if err := es.w.put(&methods); err != nil {
 			Failf("writing method functions: %w", err)
 		}
