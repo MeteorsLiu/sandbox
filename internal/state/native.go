@@ -177,7 +177,7 @@ func (ds *decodeState) decodeFunction(obj reflect.Value, f *functionValue) {
 	if obj.Kind() != reflect.Func {
 		Failf("function record cannot be decoded into %v", obj.Type())
 	}
-	if len(f.Env.Dots) != 0 {
+	if len(f.Env.Dots) != 0 || f.Env.variable != nil {
 		Failf("invalid closure environment reference")
 	}
 	if f.PC == 0 && f.Env.Root == 0 {

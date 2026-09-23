@@ -94,6 +94,9 @@ func (es *encodeState) encodeChannel(obj reflect.Value, dest *object) {
 }
 
 func (ds *decodeState) decodeChannelRef(obj reflect.Value, encoded *channelValue) {
+	if encoded.Ref.variable != nil {
+		Failf("ixgo variable reference cannot describe channel storage")
+	}
 	if encoded.Ref.Root == 0 {
 		obj.SetZero()
 		return

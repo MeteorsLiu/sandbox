@@ -82,6 +82,8 @@ type encodeState struct {
 
 	native nativeState
 
+	packageVariables map[packageVariableKey]packageVariable
+
 	// lastID is the last allocated object ID.
 	lastID objectID
 
@@ -822,6 +824,10 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 			// required. So we encode as a reference to the zero
 			// object, which does not exist. Note that this has to
 			// be handled correctly in the decode path as well.
+			return
+		}
+		if variable := es.findPackageVariable(obj); variable != nil {
+			r.variable = variable
 			return
 		}
 		es.resolve(obj, r)

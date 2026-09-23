@@ -254,6 +254,10 @@ type refValue struct {
 	// Type is the root object's type when Dots is nonempty or the pointer
 	// targets a different type through a Go pointer conversion.
 	Type typeSpec
+
+	// variable names receiver-owned storage instead of an object in this graph.
+	// Keeping the reference record kind also permits mixed pointer arrays.
+	variable *packageVariable
 }
 
 // loadRef loads an object of type refValue (abstract).
@@ -262,7 +266,13 @@ func loadRef(r *reader) refValue {
 		Root: loadUint(r),
 	}
 	header := loadUint(r)
-	l := header >> 1
+	l := header >> 2
+	if header&2 != 0 {
+		ref.variable = &packageVariable{pkg: loadString(r), name: loadString(r)}
+		if ref.Root != 0 || l != 0 || header&1 != 0 || ref.variable.pkg == "" || ref.variable.name == "" {
+			panic(fmt.Errorf("invalid ixgo variable reference"))
+		}
+	}
 	ref.Dots = make([]dot, l)
 	for i := 0; i < int(l); i++ {
 		// Field names use negative lengths; non-negative values select
@@ -288,12 +298,19 @@ func loadRef(r *reader) refValue {
 // save implements object.save.
 func (r *refValue) save(w *writer) {
 	r.Root.save(w)
-	// The low bit marks an explicit root type, independently of the path.
-	header := uintValue(len(r.Dots)) << 1
+	// The low bits mark a root type and a package variable, respectively.
+	header := uintValue(len(r.Dots)) << 2
 	if r.Type != nil {
 		header |= 1
 	}
+	if r.variable != nil {
+		header |= 2
+	}
 	header.save(w)
+	if r.variable != nil {
+		r.variable.pkg.save(w)
+		r.variable.name.save(w)
+	}
 	for _, d := range r.Dots {
 		switch x := d.(type) {
 		case index:

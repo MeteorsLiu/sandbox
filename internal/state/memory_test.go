@@ -27,6 +27,7 @@ func objectExamples() []object {
 		float32Value(math.Float32frombits(0x7fc01234)), float64Value(math.Float64frombits(0x7ff8000000001234)),
 		&c64, &c128, &s,
 		&refValue{}, &refValue{Root: 2},
+		&refValue{variable: &packageVariable{pkg: "runtime", name: "MemProfileRate"}},
 		&refValue{Root: 2, Type: typeSpecID(1)},
 		&refValue{Root: 2, Dots: []dot{&f, index(3)}, Type: &arrayType{Count: 4, Type: typeSpecID(1)}},
 		&refValue{Root: 2, Dots: []dot{index(1), arrayRange{start: 18, length: 6}, &f}},

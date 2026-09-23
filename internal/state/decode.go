@@ -615,6 +615,13 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 	case nilValue: // Fast path: first.
 		obj.SetZero()
 	case *refValue:
+		if x.variable != nil {
+			if obj.Kind() != reflect.Pointer {
+				Failf("ixgo variable reference cannot be decoded into %v", obj.Type())
+			}
+			obj.Set(x.variable.resolve(obj.Type()))
+			return
+		}
 		if id := objectID(x.Root); id == 0 {
 			obj.SetZero()
 			return
@@ -696,6 +703,9 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		}
 		obj.SetString(string(*x))
 	case *sliceValue:
+		if x.Ref.variable != nil {
+			Failf("ixgo variable reference cannot describe slice storage")
+		}
 		if id := objectID(x.Ref.Root); id == 0 {
 			obj.SetZero()
 			return
@@ -754,7 +764,7 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		var value reflect.Value
 		if x.Addressable {
 			ref, ok := x.Value.(*refValue)
-			if !ok || ref.Root == 0 || typ.Kind() != reflect.Pointer {
+			if !ok || ref.Root == 0 && ref.variable == nil || typ.Kind() != reflect.Pointer {
 				Failf("addressable reflect.Value requires a non-nil pointer")
 			}
 			value = reflect.New(typ).Elem()
