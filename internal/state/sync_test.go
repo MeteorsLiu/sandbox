@@ -1,6 +1,8 @@
 package state
 
 import (
+	"bytes"
+	"context"
 	"reflect"
 	"runtime"
 	"sync"
@@ -212,17 +214,97 @@ func TestSyncPoolZero(t *testing.T) {
 }
 
 func TestSyncOnceZero(t *testing.T) {
-	src, dst := new(sync.Once), new(sync.Once)
-	src.Do(func() {})
-	dst.Do(func() {})
-	roundtrip(t, src, dst)
-	calls := 0
-	dst.Do(func() { calls++ })
-	dst.Do(func() { calls++ })
-	src.Do(func() { t.Fatal("snapshot reset the source Once") })
-	if calls != 1 {
-		t.Fatal("restored Once did not start fresh")
+	for _, status := range []string{"zero", "done", "panic"} {
+		t.Run(status, func(t *testing.T) {
+			for _, initialized := range []bool{false, true} {
+				src, dst := new(sync.Once), new(sync.Once)
+				switch status {
+				case "done":
+					src.Do(func() {})
+				case "panic":
+					func() {
+						defer func() {
+							if got := recover(); got != "once panic" {
+								t.Fatalf("unexpected panic: %v", got)
+							}
+						}()
+						src.Do(func() { panic("once panic") })
+					}()
+				}
+				if initialized {
+					dst.Do(func() {})
+				}
+				// A reused destination must lose its old mutex state as well as done.
+				mutex := reflectValueRWAddr(reflect.ValueOf(dst).Elem().FieldByName("m")).Interface().(*sync.Mutex)
+				mutex.Lock()
+				roundtrip(t, src, dst)
+				if !mutex.TryLock() {
+					t.Fatal("restored Once retained the destination mutex state")
+				}
+				mutex.Unlock()
+				var calls atomic.Int32
+				var workers sync.WaitGroup
+				for range 8 {
+					workers.Go(func() { dst.Do(func() { calls.Add(1) }) })
+				}
+				workers.Wait()
+				want := int32(0)
+				if status == "zero" {
+					want = 1
+				}
+				if calls.Load() != want {
+					t.Fatalf("destination initialized=%v: got %d calls, want %d", initialized, calls.Load(), want)
+				}
+				sourceCalls := int32(0)
+				src.Do(func() { sourceCalls++ })
+				if sourceCalls != want {
+					t.Fatal("snapshot changed the source Once")
+				}
+			}
+		})
 	}
+	t.Run("writeback", func(t *testing.T) {
+		type root struct {
+			Once  sync.Once
+			Alias *sync.Once
+			Value int
+		}
+		host := new(root)
+		host.Alias = &host.Once
+		var guest root
+		var source, destination State
+		ctx := context.Background()
+		mem := make([]byte, 1<<20)
+		for range 2 {
+			var input bytes.Buffer
+			if _, _, err := source.SaveTo(ctx, &input, host); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := destination.Load(ctx, input.Bytes(), &guest); err != nil {
+				t.Fatal(err)
+			}
+			if guest.Alias != &guest.Once {
+				t.Fatal("Once lost its alias in the guest")
+			}
+			before := host.Value
+			guest.Alias.Do(func() { guest.Value++ })
+			guest.Once.Do(func() { guest.Value++ })
+			if guest.Value != 1 || host.Value != before {
+				t.Fatal("guest repeated initialization or modified the host")
+			}
+			n, _, err := destination.Save(ctx, mem, &guest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := source.Load(ctx, mem[:n], host); err != nil {
+				t.Fatal(err)
+			}
+			if host.Alias != &host.Once || host.Value != 1 {
+				t.Fatal("writeback lost Once identity or initialized data")
+			}
+			host.Alias.Do(func() { t.Fatal("writeback lost Once completion") })
+		}
+	})
 }
 
 func TestSyncWaitGroupZero(t *testing.T) {

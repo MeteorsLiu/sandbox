@@ -10,8 +10,9 @@ import (
 // syncFields projects synchronization wrappers onto their values. In
 // particular, atomic.Pointer[T].v must be viewed as *T so state relocates its
 // target instead of saving an untyped address. Pool.New and Cond.L retain their
-// object graphs; other sync primitives are empty records. sync.Map uses its own
-// entry codec. The source data graph is quiescent.
+// object graphs; Once retains done, with a fresh mutex on load. Other sync
+// primitives are empty records. sync.Map uses its own entry codec. The source
+// data graph is quiescent, including any Once.Do call.
 func syncFields(obj reflect.Value) ([]reflect.Value, bool) {
 	typ := obj.Type()
 	pkg, name := typ.PkgPath(), typ.Name()
@@ -20,6 +21,8 @@ func syncFields(obj reflect.Value) ([]reflect.Value, bool) {
 		return []reflect.Value{obj.FieldByName("New")}, true
 	case reflect.TypeFor[sync.Cond]():
 		return []reflect.Value{obj.FieldByName("L")}, true
+	case reflect.TypeFor[sync.Once]():
+		return []reflect.Value{obj.FieldByName("done")}, true
 	}
 	if pkg == "sync" && typ != reflect.TypeFor[sync.Map]() || pkg == "internal/sync" && name == "Mutex" {
 		return nil, true
