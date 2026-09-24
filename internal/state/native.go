@@ -136,7 +136,11 @@ func (ns *nativeState) functionStorage(obj reflect.Value) reflect.Value {
 	}
 	addr := uintptr(storage)
 	typ := ns.layout(obj.Pointer(), addr >= m.funcStart && addr < m.funcEnd)
-	return reflect.NewAt(typ, storage).Elem()
+	view, err := m.environmentView(reflect.NewAt(typ, storage).Elem())
+	if err != nil {
+		Failf("native closure captures: %w", err)
+	}
+	return view
 }
 
 func (es *encodeState) encodeFunction(obj reflect.Value, dest *object) {
@@ -164,6 +168,11 @@ func (es *encodeState) encodeFunction(obj reflect.Value, dest *object) {
 	f.PC = uintValue(pc)
 	if storage.NumField() != 1 {
 		es.resolve(storage.Addr(), &f.Env)
+		if storage.Type() != es.native.layout(pc, false) {
+			// Different instantiations can share a PC. Keep this closure's
+			// concrete view in the existing type reference, not the PC cache.
+			f.Env.Type = es.findType(storage.Type())
+		}
 	}
 	runtime.KeepAlive(obj)
 }
@@ -246,6 +255,13 @@ func (ds *decodeState) decodeFunction(obj reflect.Value, f *functionValue) {
 		return
 	}
 	typ := ds.native.layout(uintptr(f.PC), false)
+	if f.Env.Type != nil {
+		view := ds.findType(f.Env.Type)
+		if !validEnvironmentView(typ, view) {
+			Failf("closure view %v does not match PC %#x", view, f.PC)
+		}
+		typ = view
+	}
 	storage := ds.register(&f.Env, typ)
 	if storage.Type() != typ {
 		Failf("closure environment has type %v, want %v", storage.Type(), typ)

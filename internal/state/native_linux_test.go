@@ -3,6 +3,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -112,7 +113,7 @@ func requireNativeValueCapture(t *testing.T, fn any) {
 }
 
 func TestNativeFunction(t *testing.T) {
-	for _, src := range []func(int) int{nil, nativeDouble, nativeCaptureFree(), nativeGlobalCaptureFree, func(n int) int { return n * 2 }} {
+	for _, src := range []func(int) int{nil, nativeDouble, nativeGenericDouble[int], nativeCaptureFree(), nativeGlobalCaptureFree, func(n int) int { return n * 2 }} {
 		var dst func(int) int
 		roundtrip(t, &src, &dst)
 		if src == nil {
@@ -123,7 +124,87 @@ func TestNativeFunction(t *testing.T) {
 			t.Fatal("restored static function returned a different result")
 		}
 	}
+	t.Run("generic environments", func(t *testing.T) {
+		type root struct {
+			Left  func() *nativeGenericNode
+			Right func() *nativeGenericOther
+			Count func() int
+		}
+		node := &nativeGenericNode{N: 42}
+		node.Next = node
+		other := &nativeGenericOther{Text: "payload", Link: node}
+		host := root{nativeGenericCapture(node), nativeGenericCapture(other), nativeGenericCapture(42)}
+		if reflect.ValueOf(host.Left).Pointer() != reflect.ValueOf(host.Right).Pointer() {
+			t.Fatal("test must exercise a shared shape PC with different dictionaries")
+		}
+		var guest root
+		roundtrip(t, &host, &guest)
+		runtime.GC()
+		left, right := guest.Left(), guest.Right()
+		if left == node || right == other || left.N != 42 || left.Next != left || right.Text != "payload" || right.Link != left || guest.Count() != 42 {
+			t.Fatal("generic captures lost their concrete pointees, cycle or alias")
+		}
+		var ns nativeState
+		leftStorage := ns.functionStorage(reflect.ValueOf(&host.Left).Elem())
+		rightStorage := ns.functionStorage(reflect.ValueOf(&host.Right).Elem())
+		leftDict, rightDict := leftStorage.Field(2).Uint(), rightStorage.Field(2).Uint()
+		if leftDict == rightDict {
+			t.Fatal("test must use distinct dictionaries")
+		}
+		// A well-formed ELF dictionary for the wrong instantiation is still
+		// invalid. Failed validation must not write into the original graph.
+		ctx := context.Background()
+		var state State
+		mem := make([]byte, 1<<20)
+		n, _, err := state.Save(ctx, mem, &host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		marker := writer{mem: make([]byte, 16)}
+		uintValue(leftDict).save(&marker)
+		if bytes.Count(mem[:n], marker.mem[:marker.pos]) != 1 {
+			t.Fatal("dictionary address is not unique in the test image")
+		}
+		for _, replacement := range []uint64{rightDict, ^uint64(0)} {
+			word := writer{mem: make([]byte, 16)}
+			uintValue(replacement).save(&word)
+			bad := bytes.Replace(mem[:n], marker.mem[:marker.pos], word.mem[:word.pos], 1)
+			if _, err := state.Load(ctx, bad, &host); err == nil {
+				t.Fatal("restoration accepted an incompatible dictionary")
+			}
+			if host.Left() != node || host.Right() != other || node.N != 42 || other.Link != node {
+				t.Fatal("rejected dictionary changed the host")
+			}
+		}
+	})
+	t.Run("empty dictionary", func(t *testing.T) {
+		fn := nativeGenericFree[int]()
+		var restored func() int
+		roundtrip(t, &fn, &restored)
+		if restored() != 42 {
+			t.Fatal("closure with an empty dictionary changed its result")
+		}
+	})
 }
+
+type nativeGenericNode struct {
+	N    int
+	Next *nativeGenericNode
+}
+
+type nativeGenericOther struct {
+	Text string
+	Link *nativeGenericNode
+}
+
+//go:noinline
+func nativeGenericDouble[T ~int](n T) T { return n * 2 }
+
+//go:noinline
+func nativeGenericCapture[T any](v T) func() T { return func() T { return v } }
+
+//go:noinline
+func nativeGenericFree[T any]() func() int { return func() int { return 42 } }
 
 func TestNativeUnreachableMethod(t *testing.T) {
 	m, err := loadNativeMetadata()

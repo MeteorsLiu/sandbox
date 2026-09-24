@@ -48,6 +48,13 @@ type nativePromotedReceiver struct{ *nativeMethodReceiver }
 
 type nativeForeignReceiver struct{ methodpkg.Receiver }
 
+type nativeGenericReceiver[T any] struct{ value T }
+
+func (r *nativeGenericReceiver[T]) get() T { return r.value }
+
+//go:noinline
+func nativeGenericBind[T any](r *nativeGenericReceiver[T]) func() T { return r.get }
+
 func TestNativePackagePrefix(t *testing.T) {
 	for _, test := range []struct{ path, prefix string }{
 		{"runtime", "runtime"},
@@ -129,6 +136,7 @@ func TestNativeMethodValues(t *testing.T) {
 		"zero":     nativeEmptyReceiver{}.Value,
 		"scalar":   nativeScalarReceiver(42).Value,
 		"promoted": nativePromotedReceiver{r}.Value,
+		"generic":  (&nativeGenericReceiver[int]{value: 42}).get,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var restored func() int
@@ -139,6 +147,25 @@ func TestNativeMethodValues(t *testing.T) {
 			}
 		})
 	}
+	t.Run("generic binding", func(t *testing.T) {
+		node := &nativeGenericNode{N: 42}
+		node.Next = node
+		src := nativeGenericBind(&nativeGenericReceiver[*nativeGenericNode]{value: node})
+		var dst func() *nativeGenericNode
+		roundtrip(t, &src, &dst)
+		runtime.GC()
+		if got := dst(); got == node || got.N != 42 || got.Next != got {
+			t.Fatal("generic method binding lost the concrete receiver graph")
+		}
+	})
+	t.Run("generic expression", func(t *testing.T) {
+		src := (*nativeGenericReceiver[int]).get
+		var dst func(*nativeGenericReceiver[int]) int
+		roundtrip(t, &src, &dst)
+		if dst(&nativeGenericReceiver[int]{value: 42}) != 42 {
+			t.Fatal("generic method expression changed its result")
+		}
+	})
 	var nilReceiver *nativeMethodReceiver
 	fn := nilReceiver.IsNil
 	var restored func() bool
