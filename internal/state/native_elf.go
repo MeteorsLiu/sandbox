@@ -22,6 +22,8 @@ type nativeMetadata struct {
 	names              map[string]elf.Symbol
 	methods            map[string]reflect.Type
 	segments           []elf.ProgHeader
+	dictionaries       map[uintptr]uintptr // ELF dictionary address -> read-only byte size.
+	staticTypes        map[uintptr]reflect.Type
 
 	mu      sync.Mutex // Protects layouts and the set of already scanned factories.
 	layouts map[uintptr]reflect.Type
@@ -59,6 +61,7 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 		functions: make(map[uintptr]elf.Symbol), names: make(map[string]elf.Symbol),
 		methods: make(map[string]reflect.Type),
 		layouts: make(map[uintptr]reflect.Type), scanned: make(map[string]bool),
+		dictionaries: make(map[uintptr]uintptr), staticTypes: make(map[uintptr]reflect.Type),
 	}
 	var funcStart, funcEnd elf.Symbol
 	for _, s := range syms {
@@ -77,6 +80,15 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 		if elf.ST_TYPE(s.Info) == elf.STT_FUNC && s.Size != 0 {
 			m.functions[uintptr(s.Value)] = s
 			m.names[s.Name] = s
+		}
+		if strings.Contains(s.Name, "..dict.") && s.Section != elf.SHN_UNDEF && int(s.Section) < len(f.Sections) {
+			section := f.Sections[s.Section]
+			if section.Flags&elf.SHF_ALLOC != 0 && section.Flags&elf.SHF_WRITE == 0 && s.Value%8 == 0 && s.Size%8 == 0 && s.Value >= section.Addr && s.Value-section.Addr <= section.Size && s.Size <= section.Size-(s.Value-section.Addr) {
+				// Zero-sized dictionaries can share an address with the following
+				// symbol. Keep its full extent; each capture supplies its own size.
+				address := uintptr(s.Value)
+				m.dictionaries[address] = max(m.dictionaries[address], uintptr(s.Size))
+			}
 		}
 	}
 	if m.typeStart == 0 || m.typeEnd <= m.typeStart || m.newobject == 0 {
@@ -109,10 +121,12 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 	// Typelinks usually keeps *T rather than T. Index both method sets using
 	// the compiler's symbol construction, including qualified private names.
 	seen := make(map[reflect.Type]bool)
+	var types []reflect.Type
 	for len(data) >= 4 {
 		offset := int32(binary.LittleEndian.Uint32(data))
 		typ := nativeReflectType(unsafe.Pointer(m.typeStart + uintptr(offset)))
 		data = data[4:]
+		types = append(types, typ)
 		if typ.Kind() == reflect.Pointer {
 			typ = typ.Elem()
 		}
@@ -122,6 +136,17 @@ func loadNativeMetadata() (*nativeMetadata, error) {
 		seen[typ] = true
 		m.indexMethods(typ)
 		m.indexMethods(reflect.PointerTo(typ))
+	}
+	// Dictionaries also contain method PCs, subdictionaries and itabs. Only
+	// addresses reached from typelinks may be interpreted as type descriptors.
+	for i := 0; i < len(types); i++ {
+		typ := types[i]
+		address := uintptr((*[2]unsafe.Pointer)(unsafe.Pointer(&typ))[1])
+		if m.staticTypes[address] != nil {
+			continue
+		}
+		m.staticTypes[address] = typ
+		types = append(types, nativeTypeDependencies(typ)...)
 	}
 	return m, nil
 }
@@ -133,7 +158,7 @@ func (m *nativeMetadata) layout(pc uintptr, captureFree bool) (reflect.Type, err
 	defer m.mu.Unlock()
 	sym := m.functions[pc]
 	name := strings.TrimSuffix(sym.Name, ".abi0")
-	if pc == 0 || name == "" || strings.Contains(name, "[") || strings.Contains(name, "-range") || name == "reflect.makeFuncStub" || name == "reflect.methodValueCall" || captureFree && strings.HasSuffix(name, "-fm") {
+	if pc == 0 || name == "" || strings.Contains(name, "-range") || name == "reflect.makeFuncStub" || name == "reflect.methodValueCall" || captureFree && strings.HasSuffix(name, "-fm") {
 		return nil, fmt.Errorf("function %#x (%s) has no supported native closure layout", pc, name)
 	}
 	if typ := m.layouts[pc]; typ != nil {

@@ -305,6 +305,97 @@ func TestSyncOnceZero(t *testing.T) {
 			host.Alias.Do(func() { t.Fatal("writeback lost Once completion") })
 		}
 	})
+	// Native closure migration requires the same ELF on Linux amd64 or arm64.
+	if runtime.GOOS == "linux" && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") {
+		t.Run("OnceValue", func(t *testing.T) {
+			for _, test := range []struct {
+				name        string
+				initialized bool
+				panics      bool
+			}{
+				{name: "uninitialized"},
+				{name: "cached", initialized: true},
+				{name: "uninitialized_panic", panics: true},
+				{name: "cached_panic", initialized: true, panics: true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					type result struct{ N int }
+					type root struct {
+						Calls  int
+						Panics bool
+						Result *result
+						Value  func() *result
+						Alias  func() *result
+					}
+					host := &root{Panics: test.panics, Result: &result{N: 42}}
+					host.Value = sync.OnceValue(func() *result {
+						host.Calls++
+						if host.Panics {
+							panic(host.Result)
+						}
+						return host.Result
+					})
+					host.Alias = host.Value
+					original := host.Value
+					check := func(fn func() *result, want *result) {
+						t.Helper()
+						if test.panics {
+							defer func() {
+								if got := recover(); got != want {
+									t.Fatalf("panic value = %v, want %p", got, want)
+								}
+							}()
+							fn()
+							t.Fatal("OnceValue did not repeat its panic")
+						}
+						if got := fn(); got != want {
+							t.Fatalf("cached result = %p, want %p", got, want)
+						}
+					}
+					if test.initialized {
+						check(host.Value, host.Result)
+					}
+					ctx := context.Background()
+					mem := make([]byte, 1<<20)
+					var source, destination State
+					var guest root
+					for range 2 {
+						beforeCalls, beforeValue := host.Calls, host.Result.N
+						n, _, err := source.Save(ctx, mem, host)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := destination.Load(ctx, mem[:n], &guest); err != nil {
+							t.Fatal(err)
+						}
+						runtime.GC()
+						if guest.Result == host.Result || guest.Calls != beforeCalls || guest.Result.N != beforeValue {
+							t.Fatal("OnceValue reused host storage or ran during transfer")
+						}
+						check(guest.Value, guest.Result)
+						check(guest.Alias, guest.Result)
+						guest.Result.N++
+						if guest.Calls != 1 || host.Calls != beforeCalls || host.Result.N != beforeValue {
+							t.Fatal("OnceValue repeated initialization or changed the host")
+						}
+						n, _, err = destination.Save(ctx, mem, &guest)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := source.Load(ctx, mem[:n], host); err != nil {
+							t.Fatal(err)
+						}
+						check(host.Value, host.Result)
+						check(host.Alias, host.Result)
+						check(original, host.Result)
+						if host.Calls != 1 || host.Result.N != beforeValue+1 {
+							t.Fatal("writeback lost initialization state or the cached object")
+						}
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestSyncWaitGroupZero(t *testing.T) {

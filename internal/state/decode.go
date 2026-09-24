@@ -942,6 +942,21 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		if f.storage.Field(0).Uint() != uint64(f.pc) {
 			Failf("closure storage does not match PC %#x", f.pc)
 		}
+		m, err := executableNativeMetadata()
+		if err != nil {
+			Failf("native closure metadata: %w", err)
+		}
+		raw, err := m.layout(f.pc, false)
+		if err != nil {
+			Failf("native closure layout: %w", err)
+		}
+		view, err := m.environmentView(reflect.NewAt(raw, f.storage.Addr().UnsafePointer()).Elem())
+		if err != nil {
+			Failf("native closure captures: %w", err)
+		}
+		if view.Type() != f.storage.Type() {
+			Failf("closure view does not match its dictionary for PC %#x", f.pc)
+		}
 	}
 	for callback, fn := range ds.makeFuncs {
 		makeFuncCallback(fn).Set(callback)
